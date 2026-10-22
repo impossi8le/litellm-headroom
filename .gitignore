@@ -4,6 +4,10 @@ litellm-config1.yaml
 litellm-config.original.yaml
 .env
 
+# Atomic-write leftovers (render.py / editor.py use mkstemp next to the target)
+litellm-config.yaml.tmp
+litellm-config.yaml.*.tmp
+
 # Virtual environments
 .venv/
 .litellm-venv/

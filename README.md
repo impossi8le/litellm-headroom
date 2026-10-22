@@ -2,18 +2,69 @@
 
 Gateway: `http://127.0.0.1:8001`; Headroom: `http://127.0.0.1:8787`.
 Start with `bat.bat` (or `powershell -ExecutionPolicy Bypass -File .\start.ps1`); stop with `stop-litellm-headroom.bat`.
-The launcher reuses healthy running services. Restart LiteLLM after changing YAML.
+The launcher reuses healthy running services. `start.ps1 -Restart` restarts only
+LiteLLM; Headroom keeps running.
 
 ## First-time setup
 
 1. Create both environments as described under Dependencies.
-2. Copy `litellm-config.example.yaml` to `litellm-config.yaml`.
-3. Export `RELAY_FAST_API_KEY` (provider key) and `LITELLM_MASTER_KEY` (the key
-   clients send); the config references them by name, so no key is stored in git.
+2. Generate `litellm-config.yaml` from the committed `models.yaml` with
+   `.\.litellm-venv\Scripts\python.exe render.py --root .` (see Routing
+   configuration). Without `models.yaml`, copy `litellm-config.example.yaml`
+   to `litellm-config.yaml` instead.
+3. Put `RELAY_FAST_API_KEY` (provider key) and `LITELLM_MASTER_KEY` (the key
+   clients send) in `.env`, or export them. `start.ps1` imports `.env` when it
+   is present. The configs reference the variables by name, so no key is
+   stored in git.
 4. Run `bat.bat` and verify with `smoke_check.py`.
 
-`litellm-config.yaml`, the other local configs, `logs/`, `backups/` and both
-virtual environments are gitignored. Only the example config is published.
+`litellm-config.yaml`, `.env`, the other local configs, `logs/`, `backups/` and
+both virtual environments are gitignored. `models.yaml` is committed and holds
+no keys. Only the example config is published.
+
+## Routing configuration
+
+`models.yaml` is the source of truth for routing. It defines providers (the
+`key_env` field holds the NAME of an environment variable, never a key),
+timeouts, aliases with their deployments (`provider`, `model`, `dialect`,
+optional `key_env`, `order`) and fallbacks. `litellm-config.yaml` is generated
+from it, so edit `models.yaml` rather than the generated file. Deployments with
+the same `order` form one load-balanced tier; a higher `order` is tried after a
+lower one, and the alias `fallbacks` are used after its own deployments.
+
+```powershell
+.\.litellm-venv\Scripts\python.exe render.py --root .
+```
+
+`render.py` validates before writing: unknown providers or fallback targets,
+duplicate aliases, empty deployment lists, bad dialects and fallback cycles are
+reported as `error: ...` lines and exit 1, leaving the existing
+`litellm-config.yaml` untouched. It exits 0 silently when `models.yaml` is
+absent, so a checkout without it keeps using a hand-written config.
+
+`start.ps1` renders whenever `models.yaml` exists, before any service starts, so
+a bad `models.yaml` stops the launch instead of starting LiteLLM on a stale
+config. `start.ps1 -Restart` stops and restarts only LiteLLM.
+
+`models.yaml` is committed; it contains no credentials. The rendered config
+references keys as `os.environ/<NAME>`.
+
+### Editor
+
+`editor.py` serves a local page on `127.0.0.1:8788` for providers (add, edit,
+delete) and aliases with deployments and fallbacks. «Сохранить» validates and
+writes `models.yaml`; «Применить» writes `models.yaml` and `litellm-config.yaml`
+and calls the restart hook passed to `make_server`. There is no
+`python editor.py` entrypoint yet; start the server with:
+
+```powershell
+.\.litellm-venv\Scripts\python.exe -c "import editor; editor.make_server('.').serve_forever()"
+```
+
+Without a restart hook, «Применить» does not restart LiteLLM; use
+`start.ps1 -Restart` for that. The server binds to loopback only and rejects
+requests whose `Host` is not `127.0.0.1` or `localhost`. It accepts and displays
+only the env-var name, never a key value.
 
 ## Provider configuration
 
@@ -45,8 +96,9 @@ models on Chat Completions when a client sends `/v1/messages` requests.
 Headroom compression remains enabled globally. Function calling capability
 metadata belongs in `model_info`, not in the upstream request parameters.
 
-The provider key is in each model's `litellm_params.api_key`; clients authenticate
-with the separate `general_settings.master_key`. Keep YAML and backups private.
+In the rendered config the provider key is an `os.environ/<NAME>` reference in
+each model's `litellm_params.api_key`; clients authenticate with the separate
+`general_settings.master_key`. Keep YAML and backups private.
 
 ## Dependencies
 
@@ -104,6 +156,9 @@ The smoke check makes small billable requests for all four aliases and records
 results in `logs/smoke-results.json`. Health and model listing alone do not
 prove that inference is working. A fallback response also does not prove that
 the preferred model recovered. Configuration backups are under `backups/`.
+
+The unittest suite covers routing validation and rendering, the render CLI, the
+editor API and the one-off migration round-trip.
 
 ## Latest live result (2026-10-20)
 
