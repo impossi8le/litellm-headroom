@@ -1,12 +1,42 @@
-param([int]$StartupTimeoutSeconds = 120)
+param([int]$StartupTimeoutSeconds = 120, [switch]$Restart)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $headroom = Join-Path $PSScriptRoot '.venv\Scripts\headroom.exe'
 $litellm = Join-Path $PSScriptRoot '.litellm-venv\Scripts\python.exe'
 $config = Join-Path $PSScriptRoot 'litellm-config.yaml'
+$models = Join-Path $PSScriptRoot 'models.yaml'
+$envFile = Join-Path $PSScriptRoot '.env'
 $logDir = Join-Path $PSScriptRoot 'logs'
 $started = @()
+
+function Import-EnvFile([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path)) { return }
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if (!$trimmed -or $trimmed.StartsWith('#')) { continue }
+        $idx = $trimmed.IndexOf('=')
+        if ($idx -lt 1) { continue }
+        $name = $trimmed.Substring(0, $idx).Trim()
+        $value = $trimmed.Substring($idx + 1).Trim().Trim('"').Trim("'")
+        if (!(Test-Path "Env:$name")) { Set-Item -Path "Env:$name" -Value $value }
+    }
+}
+
+function Stop-LiteLLM {
+    $targets = @(Get-CimInstance Win32_Process | Where-Object {
+        ($_.Name -match '^python(w)?\.exe$') -and ($_.CommandLine -match '\blitellm\.proxy\.proxy_cli\b')
+    })
+    foreach ($target in $targets) {
+        $running = Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue
+        if ($running) { Stop-Process -InputObject $running -Force -ErrorAction SilentlyContinue }
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        if (!(Test-Service 'http://127.0.0.1:8001/health/liveliness')) { return }
+        Start-Sleep -Milliseconds 300
+    }
+}
 
 function Test-Service([string]$Url) {
     try {
@@ -45,6 +75,12 @@ try {
     if (!(Test-Path -LiteralPath $litellm)) { throw "LiteLLM is missing. Run python -m venv .litellm-venv --system-site-packages, then .litellm-venv\Scripts\python.exe -m pip install -r requirements.txt" }
     if (!(Test-Path -LiteralPath $config)) { throw "Config is missing: $config" }
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    Import-EnvFile $envFile
+    if (Test-Path -LiteralPath $models) {
+        & $litellm (Join-Path $PSScriptRoot 'render.py') --root $PSScriptRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Config render failed: see the errors above' }
+    }
+    if ($Restart) { Stop-LiteLLM }
     Remove-Item Env:LITELLM_LOG -ErrorAction SilentlyContinue
     $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONUNBUFFERED = '1'
@@ -56,7 +92,7 @@ try {
     Write-Host ''
     Write-Host 'Gateway URL: http://127.0.0.1:8001'
     Write-Host 'Models: http://127.0.0.1:8001/v1/models'
-    Write-Host 'API key: general_settings.master_key in litellm-config.yaml.'
+    Write-Host 'API key: LITELLM_MASTER_KEY from .env (or the environment).'
     Write-Host "Logs: $logDir"
     exit 0
 } catch {
