@@ -61,6 +61,15 @@ router_settings:
   - claude-3-opus-20240229:
     - claude-3-5-haiku-202609122
     - claude-3-5-haiku-20251011
+  - claude-3-5-haiku-20251011:
+    - claude-3-5-haiku-202609122
+    - claude-3-5-haiku-20251111
+  - claude-3-5-haiku-20251111:
+    - claude-3-5-haiku-202609122
+    - claude-3-5-haiku-20251011
+  - claude-3-5-haiku-202609122:
+    - claude-3-5-haiku-20251011
+    - claude-3-5-haiku-20251111
   timeout: 300
   stream_timeout: 120
   cooldown_time: 5
