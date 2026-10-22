@@ -1,5 +1,10 @@
 # Routing Config and Editor Implementation Plan
 
+> Historical implementation plan, retained as design history. The baseline routing/editor
+> implementation exists and has since been extended. Unchecked steps below are not a live
+> project status or an instruction to execute work. Current behavior, limitations and verified
+> results are documented in [README](../../../README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move routing out of the hand-maintained `litellm-config.yaml` into a validated `models.yaml` source of truth, generate the LiteLLM config from it, and add a local HTML editor that writes both files.

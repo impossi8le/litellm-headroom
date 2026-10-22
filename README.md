@@ -1,247 +1,382 @@
-# LiteLLM + relay.fast + Headroom
+# LiteLLM + Headroom: локальный шлюз моделей
 
-Gateway: `http://127.0.0.1:8001`; Headroom: `http://127.0.0.1:8787`.
-Start with `bat.bat` (or `powershell -ExecutionPolicy Bypass -File .\start.ps1`); stop with `stop-litellm-headroom.bat`.
-The launcher reuses healthy running services. `start.ps1 -Restart` restarts only
-LiteLLM; Headroom keeps running.
+Документация сверена с кодом и конфигурацией 22 октября 2026 года. Текущий рабочий каталог — `D:\litellm_headroom`. Реальные маршруты определяет [models.yaml](models.yaml), а не названия моделей в клиенте.
 
-To create/update the two desktop launchers, run
-`powershell -ExecutionPolicy Bypass -File .\install-desktop-launchers.ps1`.
-Both desktop `.bat` files call the current scripts in this checkout; previous
-desktop versions are kept in `backups/desktop_*`. The stop command targets
-processes belonging to this workspace, including the routing editor.
+Проект запускает LiteLLM, отдельный Headroom и локальный редактор маршрутов на Windows. Сейчас настроен один upstream-провайдер — relay.fast. Код также позволяет описывать другие совместимые API и встроенные адаптеры LiteLLM. Подключение нового провайдера требует его адреса, доступных моделей и нужных учётных данных; автоматически они не создаются.
 
-## Multi-provider gateway (2026-10-22)
+## Как проходит запрос
 
-The editor starts with the gateway at `http://127.0.0.1:8788/`; use
-`start.ps1 -NoEditor` to skip it. Existing relay.fast aliases are preserved.
-Add providers and deployments in the editor or in `models.yaml`:
+```text
+Клиент → LiteLLM :8001 → выбранный провайдер → ответ клиенту
+             │
+             └─ перед запросом: Headroom :8787 /v1/compress
 
-- `dialect: openai`: any OpenAI-compatible endpoint; use `api_base` or
-  `chat_base`, a bare upstream model name and `key_env`.
-- `dialect: anthropic`: an Anthropic-compatible endpoint; use `api_base` or
-  `messages_base`, a bare model name and `key_env`.
-- `dialect: native`: use the full LiteLLM model string, such as
-  `azure/YOUR_DEPLOYMENT`, `gemini/YOUR_MODEL`, `bedrock/YOUR_MODEL_ID`,
-  `vertex_ai/YOUR_MODEL` or `ollama/YOUR_MODEL`. `api_base` is optional for
-  adapters with built-in endpoints. AWS/Google credential chains work without
-  an API key; `key_env` remains available where needed.
+Редактор :8788 → models.yaml → render → litellm-config.yaml → перезапуск LiteLLM
+```
 
-Provider `params` are inherited; deployment `params` override them. These JSON
-objects in the editor map to LiteLLM parameters, including `api_version`,
-`aws_region_name`, `vertex_project`, `vertex_location`, `rpm`, `tpm`, `weight`
-and `timeout`. Use `os.environ/NAME` for secret parameters. Use dedicated
-fields for `model`, `api_base`, `api_key` and `order`. Set provider
-`anonymous: true` for a local OpenAI-compatible server that needs no key
-(the OpenAI client receives a dummy `not-needed` value). Native adapter
-capabilities depend on the installed LiteLLM version and provider access.
+Клиент обращается к LiteLLM. Headroom работает как sidecar для обработки контекста, а не как основной адрес клиента. Сам редактор не отправляет запросы генерации при сохранении и применении настроек.
 
-See `models.multi-provider.example.yaml` for a validated template and
-`.env.example` for environment variable names. Replace model placeholders
-with models available in your accounts. Fallbacks can cross providers;
-deployment `order` defines priority tiers inside an alias.
+| Компонент | Адрес | Назначение |
+| --- | --- | --- |
+| LiteLLM | http://127.0.0.1:8001 | API шлюза |
+| Список алиасов | http://127.0.0.1:8001/v1/models | Требует ключ шлюза |
+| Liveness LiteLLM | http://127.0.0.1:8001/health/liveliness | Проверка доступности процесса |
+| Редактор | http://127.0.0.1:8788/ | Провайдеры, деплойменты, fallbacks |
+| Headroom | http://127.0.0.1:8787/health | Проверка sidecar |
+| Панель Headroom | http://127.0.0.1:8787/dashboard | Локальная статистика |
+| Метрики Headroom | http://127.0.0.1:8787/stats и http://127.0.0.1:8787/metrics | JSON и Prometheus |
 
-Applying in the editor saves private backups under `backups/apply_*`. If the
-new service fails to restart, both previous YAML files are restored and a
-restart with the old configuration is attempted. The editor reports recovery
-status. Configuration mutations are serialized.
+Все три сервиса по умолчанию слушают только `127.0.0.1`. Встроенный административный UI LiteLLM отключён; используется редактор проекта.
 
-Headroom uses a 15-second compression timeout and `fail_open` by default:
-if it is unreachable, inference continues with the original context. Set
-`compression.unreachable_fallback: fail_closed` if compression is mandatory.
-`compression.enabled: false` removes the guardrail; `compression.api_base`
-selects its endpoint. Local counters are enabled on newly launched Headroom
-processes (`/stats`, `/metrics`, `/dashboard`); the external beacon stays off.
-Existing processes keep their original environment until restarted.
+## Запуск, применение и остановка
 
-References: [LiteLLM configuration](https://docs.litellm.ai/docs/proxy/configs),
-[OpenAI-compatible endpoints](https://docs.litellm.ai/docs/providers/openai_compatible),
-[routing](https://docs.litellm.ai/docs/routing),
-[Headroom sidecar](https://docs.headroomlabs.ai/docs/proxy).
+Запуск двойным щелчком: `bat.bat` в проекте либо одноимённый файл на рабочем столе. Из PowerShell:
 
-## First-time setup
+```powershell
+Set-Location D:\litellm_headroom
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+```
 
-1. Create both environments as described under Dependencies.
-2. Generate `litellm-config.yaml` from the committed `models.yaml` with
-   `.\.litellm-venv\Scripts\python.exe render.py --root .` (see Routing
-   configuration). Without `models.yaml`, copy `litellm-config.example.yaml`
-   to `litellm-config.yaml` instead.
-3. Put `RELAY_FAST_API_KEY` (provider key) and `LITELLM_MASTER_KEY` (the key
-   clients send) in `.env`, or export them. `start.ps1` imports `.env` when it
-   is present. The configs reference the variables by name, so no key is
-   stored in git.
-4. Run `bat.bat` and verify with `smoke_check.py`.
+Скрипт импортирует `.env`, генерирует конфигурацию из `models.yaml`, затем последовательно запускает Headroom, LiteLLM и редактор. Новые процессы работают со скрытым окном; stdout/stderr записываются в `logs/`. Здоровый сервис повторно используется. При ошибке старта скрипт пытается остановить процессы, запущенные этим вызовом, и возвращает код 1.
 
-`litellm-config.yaml`, `.env`, the other local configs, `logs/`, `backups/` and
-both virtual environments are gitignored. `models.yaml` is committed and holds
-no keys. Only the example config is published.
+| Команда / параметр | Фактическое поведение |
+| --- | --- |
+| `start.ps1` | Генерирует конфигурацию; повторно использует сервисы с HTTP 200 на проверяемых адресах |
+| `start.ps1 -Restart` | Останавливает LiteLLM этого проекта и запускает его снова; Headroom и работающий редактор сохраняются |
+| `start.ps1 -NoEditor` | Не запускает новый редактор; уже работающий редактор не останавливает |
+| `start.ps1 -StartupTimeoutSeconds 180` | До 180 секунд ожидания готовности каждого нового сервиса; диапазон 1–600, по умолчанию 120 |
+| `stop-litellm-headroom.bat` | Вызывает `stop.ps1`, затем ждёт нажатия клавиши |
+| `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\stop.ps1` | Останавливает LiteLLM, Headroom и редактор этого каталога |
+| `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\stop.ps1 -LiteLLMOnly` | Останавливает только LiteLLM |
 
-## Routing configuration
+Остановка принудительная: активные запросы могут оборваться. Процессы отбираются по имени и командной строке с путём проекта. Это не служба Windows: автозапуска при входе, watchdog и автоматического восстановления после последующего падения здесь нет.
 
-`models.yaml` is the source of truth for routing. It defines providers (the
-`key_env` field holds the NAME of an environment variable, never a key),
-timeouts, aliases with their deployments (`provider`, `model`, `dialect`,
-optional `key_env`, `order`) and fallbacks. `litellm-config.yaml` is generated
-from it, so edit `models.yaml` rather than the generated file. Deployments with
-the same `order` form one load-balanced tier; a higher `order` is tried after a
-lower one, and the alias `fallbacks` are used after its own deployments.
+**Изменённый YAML не означает, что работающий процесс его загрузил.** Обычный запуск может перегенерировать файл и оставить здоровый LiteLLM со старыми настройками. Для применения используйте «Применить» в редакторе или `start.ps1 -Restart`. Проверка готовности опирается на HTTP 200, без проверки владельца порта или хеша загруженной конфигурации.
+
+Чтобы обновить окружение Headroom, например после правки `.env` или стартовых параметров, остановите весь набор через `stop.ps1`, затем запустите `start.ps1`.
+
+### Файлы на рабочем столе
+
+Сейчас установлены:
+
+- `C:\Users\user\Desktop\bat.bat` → вызывает `D:\litellm_headroom\bat.bat`;
+- `C:\Users\user\Desktop\stop-litellm-headroom.bat` → вызывает одноимённый файл проекта.
+
+На GitHub хранятся проектные `.bat` и [установщик](install-desktop-launchers.ps1). Файлы рабочего стола — короткие локальные обёртки, а не отдельные копии логики запуска.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-desktop-launchers.ps1
+# При необходимости указать каталог явно:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-desktop-launchers.ps1 -DesktopPath C:\Users\user\Desktop
+```
+
+Установщик заменяет только два названных файла, сохраняя предыдущие версии в `backups/desktop_<дата>/`. После переноса проекта запустите его заново: обёртки содержат абсолютный путь. Запускной `.bat` передаёт аргументы в `start.ps1`; остановочный `.bat` параметры в `stop.ps1` не передаёт.
+
+## Установка с нуля и зависимости
+
+Текущая локальная установка использует Python 3.12.7, LiteLLM Proxy 1.106.0 и Headroom 0.41.0. Верхнеуровневые версии закреплены в [requirements.txt](requirements.txt) и [requirements-headroom.txt](requirements-headroom.txt). Это не полный lock-файл транзитивных зависимостей.
+
+Используются разные окружения: `.litellm-venv` для LiteLLM/редактора/проверок, `.venv` для Headroom. В этой установке их proxy-зависимости требуют разных основных версий MCP; не объединяйте окружения.
+
+Пример создания независимых окружений:
+
+```powershell
+Set-Location D:\litellm_headroom
+python -m venv .litellm-venv
+.\.litellm-venv\Scripts\python.exe -m pip install -r requirements.txt
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-headroom.txt
+Copy-Item .env.example .env
+```
+
+Последнюю команду выполняйте только при отсутствии своей `.env`. Заполните её локально. Для текущих маршрутов нужны `LITELLM_MASTER_KEY` и `RELAY_FAST_API_KEY`.
+
+```powershell
+.\.litellm-venv\Scripts\python.exe render.py --root .
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+.\.litellm-venv\Scripts\python.exe smoke_check.py --health-only --compression
+```
+
+Имеющаяся `.litellm-venv` создана с `--system-site-packages`: она использует в том числе глобальные пакеты Python и зависит от базовой установки. Это отличается от независимого окружения из примера выше. Чистая переустановка в рамках последних проверок не выполнялась; проверялись работающие окружения и `pip check`.
+
+## Ключи и окружение
+
+| Переменная | Кто использует |
+| --- | --- |
+| `LITELLM_MASTER_KEY` | Ключ клиента для доступа к шлюзу |
+| `RELAY_FAST_API_KEY` | Ключ LiteLLM для relay.fast |
+| Другие переменные | Определяются настройками конкретного провайдера; примеры есть в [.env.example](.env.example) |
+
+Эти два ключа выполняют разные задачи. Клиенту передаётся ключ шлюза, а не upstream-провайдера. В `key_env` записывается **имя** переменной; генератор превращает его в `os.environ/NAME`.
+
+`start.ps1` читает `.env` рядом с собой. Значения уже существующих переменных процесса имеют приоритет, даже если они пустые. Поддерживаются `NAME=value`, необязательный префикс `export`, парные внешние кавычки, пустые строки и отдельные строки-комментарии. Подстановки `${NAME}`, многострочные значения и полная семантика dotenv не реализованы; комментарий после значения специально не удаляется.
+
+Переменные наследуются запущенными дочерними процессами, но не появляются в другом уже открытом терминале. `smoke_check.py` отдельно умеет прочитать ключ шлюза из `.env`. Самостоятельно запущенный `editor.py` `.env` не импортирует: для `/api/catalog` ему нужны переменные собственного процесса. Restart-hook редактора вызывает `start.ps1`, который импортирует `.env`, однако ранее унаследованные значения по-прежнему имеют приоритет.
+
+Секреты в `params` задавайте ссылками `os.environ/NAME`. Проверка ищет чувствительные имена параметров и вложенные словари; это не универсальный сканер утечек. Не вводите секреты в произвольные текстовые поля, имена алиасов или модельные метаданные. Часть полей интерфейса сохраняет черновики в `localStorage` браузера.
+
+## Источник конфигурации
+
+[models.yaml](models.yaml) — основной редактируемый файл. [routing.py](routing.py) валидирует его и создаёт словарь LiteLLM; [render.py](render.py) записывает `litellm-config.yaml` через временный файл и `os.replace`.
 
 ```powershell
 .\.litellm-venv\Scripts\python.exe render.py --root .
 ```
 
-`render.py` validates before writing: unknown providers or fallback targets,
-duplicate aliases, empty deployment lists, bad dialects and fallback cycles are
-reported as `error: ...` lines and exit 1, leaving the existing
-`litellm-config.yaml` untouched. It exits 0 silently when `models.yaml` is
-absent, so a checkout without it keeps using a hand-written config.
+При ошибках структуры или ссылок CLI выводит `error: ...`, возвращает 1 и не заменяет рабочий конфиг. Если `models.yaml` отсутствует, `render.py` молча возвращает 0; запуск в таком режиме требует готовый `litellm-config.yaml`. Как исходный вариант доступен [litellm-config.example.yaml](litellm-config.example.yaml). Если `models.yaml` есть, ручные изменения сгенерированного файла будут перезаписаны.
 
-`start.ps1` renders whenever `models.yaml` exists, before any service starts, so
-a bad `models.yaml` stops the launch instead of starting LiteLLM on a stale
-config. `start.ps1 -Restart` stops and restarts only LiteLLM.
+В Git хранятся `models.yaml` и примеры без реальных ключей. `.env`, `litellm-config.yaml`, два старых локальных конфига, `logs/`, `backups/`, виртуальные окружения и проектная `.headroom/` исключены через [.gitignore](.gitignore). Сам Headroom может хранить состояние также в пользовательском каталоге вне проекта. Логи и резервные копии могут содержать частные данные — gitignore не является их очисткой или шифрованием.
 
-`models.yaml` is committed; it contains no credentials. The rendered config
-references keys as `os.environ/<NAME>`.
+## Подключение провайдеров
 
-### Editor
+[models.multi-provider.example.yaml](models.multi-provider.example.yaml) — шаблон с совместимым API, Azure, Gemini, Bedrock, Vertex AI и Ollama. `YOUR_MODEL` и подобные значения — заполнители. Копировать шаблон целиком поверх своих маршрутов не требуется: добавьте нужных провайдеров и алиасы.
 
-`editor.py` serves a local page on `127.0.0.1:8788` for providers (add, edit,
-delete) and aliases with deployments and fallbacks. «Сохранить» validates and
-writes `models.yaml`; «Применить» writes `models.yaml` and `litellm-config.yaml`
-and calls the restart hook passed to `make_server`. Start it independently with:
+### Поля провайдера и деплоймента
+
+| Поле | Поведение |
+| --- | --- |
+| `providers.<имя>.key_env` | Имя переменной ключа по умолчанию |
+| `api_base` | Общий адрес провайдера; в режиме native необязателен, если адаптер знает стандартный endpoint |
+| `chat_base` | Для `openai` имеет приоритет над `api_base` |
+| `messages_base` | Для `anthropic` имеет приоритет над `api_base` |
+| `anonymous: true` | Без эффективного `key_env` подставляет фиктивный `api_key: not-needed` для сервера без ключа |
+| `params` | Дополнительные `litellm_params` провайдера |
+| `deployments[].provider` | Ссылка на имя описанного провайдера |
+| `deployments[].dialect` | `openai`, `anthropic` или `native` |
+| `deployments[].model` | Имя upstream-модели; правила префикса зависят от dialect |
+| `deployments[].key_env` | Непустое значение заменяет ключ провайдера; пустое наследует его |
+| `deployments[].order` | Обязательное целое число от 1; меньший номер — более ранний tier |
+| `deployments[].params` | Поверхностно заменяет одноимённые параметры провайдера; вложенные словари не объединяются |
+| `aliases[].model_info` | Метаданные алиаса, копируются каждому его деплойменту |
+
+В `params` нельзя задавать `model`, `api_base`, `api_key`, `order`: используйте выделенные поля. Адрес и `anonymous` задаются провайдеру; отдельного поля адреса у деплоймента нет. Для разных адресов создайте разных провайдеров. Для имён провайдеров в редакторе используйте латиницу, цифры, `-` и `_`: точки пересекаются с механизмом путей полей формы.
+
+### Три режима
+
+| Dialect | Что указать в `model` | Результат генерации |
+| --- | --- | --- |
+| `openai` | Имя без служебного префикса, например `YOUR_MODEL` | `openai/YOUR_MODEL` |
+| `anthropic` | Имя без служебного префикса | `anthropic/YOUR_MODEL` |
+| `native` | Полную строку LiteLLM, например `azure/YOUR_DEPLOYMENT` или `ollama/YOUR_MODEL` | Строка передаётся без добавления префикса |
+
+В `openai`/`anthropic` обязателен эффективный `key_env` либо `anonymous: true`. У native ключ можно не указывать: адаптер использует собственный механизм, например AWS credential chain или Google Application Default Credentials. Учётные данные всё равно должны быть настроены на машине.
+
+Пример одного произвольного OpenAI-совместимого API:
+
+```yaml
+providers:
+  my-api:
+    api_base: https://gateway.example/v1
+    key_env: MY_API_KEY
+    params:
+      rpm: 60
+aliases:
+- name: my-model
+  deployments:
+  - provider: my-api
+    model: YOUR_MODEL
+    dialect: openai
+    order: 1
+    params:
+      timeout: 90
+  fallbacks: []
+```
+
+Для локального OpenAI-совместимого сервера можно заменить адрес на его endpoint, убрать `key_env` и поставить `anonymous: true`. Для нативного адаптера используйте `dialect: native`, полный префикс и параметры из документации LiteLLM, например `api_version`, `aws_region_name`, `vertex_project`, `vertex_location`.
+
+Валидатор проверяет форму данных, URL без встроенных credentials/query/fragment, имена env-переменных, обязательные поля, ссылки и циклы fallback. Он не проверяет наличие значения переменной, баланс, доступность upstream, реальность модели, поддержку каждого `params` установленным адаптером и возможности tool calling. В native проверяется наличие префикса с `/`, а не существование этого адаптера. Успешная генерация YAML не заменяет реальный запрос.
+
+### Приоритеты и fallback
+
+Несколько деплойментов с одинаковым `order` образуют один tier для балансировки LiteLLM. Следующий больший `order` — резервный tier. `fallbacks` перечисляет другие алиасы, которые можно пробовать после собственных деплойментов. Они могут вести к другим провайдерам; самоссылки и циклы запрещены.
+
+Рендерер не вводит собственный маршрутизатор: порядок, retries и cooldown исполняет установленный LiteLLM. Успешный fallback не доказывает восстановление основной модели. Метаданные `supports_function_calling: true` являются объявлением конфигурации, а не результатом теста инструментария.
+
+### Текущие пять алиасов relay.fast
+
+| Клиентский алиас | Основная модель | Dialect | Fallback-алиасы по порядку |
+| --- | --- | --- | --- |
+| `claude-3-5-sonnet-20241022` | `kimi-k3` | openai | `claude-3-5-haiku-20251011`, `claude-3-5-haiku-202609122` |
+| `claude-3-opus-20240229` | `claude-haiku-5-5` | anthropic | `claude-3-5-haiku-202609122`, `claude-3-5-haiku-20251011` |
+| `claude-3-5-haiku-20251011` | `deepseek-v4.1-flash-1017` | openai | `claude-3-5-haiku-202609122`, `claude-3-5-haiku-20251111` |
+| `claude-3-5-haiku-20251111` | `deepseek-v4.1-flash` | openai | Нет |
+| `claude-3-5-haiku-202609122` | `gpt-6-luna` | openai | `claude-3-5-haiku-20251111` |
+
+Все имеют один деплоймент с `order: 1` и `supports_function_calling: true`. Название `claude-…` здесь является совместимым клиентским ярлыком и не гарантирует семейство Claude. В конфигурации relay.fast используются `https://relay.fast/v1` для openai и `https://relay.fast` для anthropic. Ключ шлюза остаётся отдельным.
+
+## Редактор и применение настроек
+
+Редактор запускается вместе со шлюзом. Отдельный запуск:
 
 ```powershell
 .\.litellm-venv\Scripts\python.exe editor.py --no-browser
 ```
 
-The CLI installs a restart hook. With `--no-restart`, or `make_server` without
-a restart hook, «Применить» does not restart LiteLLM; use
-`start.ps1 -Restart` for that. The server binds to loopback only and rejects
-requests whose `Host` is not `127.0.0.1` or `localhost`. It accepts and displays
-only the env-var name, never a key value.
+Доступны `--root`, `--host`, `--port`, `--no-browser`, `--no-restart`. Допустимые host — только `127.0.0.1` и `localhost`; по умолчанию порт 8788. Без `--no-browser` самостоятельный запуск пытается открыть страницу.
 
-## Provider configuration
+Интерфейс позволяет редактировать провайдеров, адреса, ключевые env-имена, native-режим, JSON `params`, алиасы, деплойменты, их порядок и fallback, а также флаг function calling. Некорректный JSON блокирует сохранение. Отдельных UI-полей для верхнеуровневых `timeouts`, `compression` и произвольного `model_info` нет: изменяйте их в YAML. Неизменённые дополнительные поля сохраняются в рабочем объекте конфигурации.
 
-Official references:
-- https://relay.fast/docs
-- https://relay.fast/openai-compatible-api
-- https://relay.fast/anthropic-compatible-api
-- https://relay.fast/status
-- https://docs.litellm.ai/docs/providers/openai_compatible
-- https://docs.litellm.ai/docs/routing
+- **«Сохранить»** валидирует и атомарно записывает только `models.yaml`. Не генерирует рабочий конфиг, не перезапускает LiteLLM, отдельную backup-копию не создаёт.
+- **«Применить»** сначала сохраняет существующие оба YAML в `backups/apply_<UTC-дата>/`, затем последовательно заменяет `models.yaml` и `litellm-config.yaml` и вызывает restart-hook.
+- При неудаче restart-hook восстанавливает прежние файлы и делает ещё одну попытку запуска с ними. Интерфейс сообщает результат восстановления. Если восстановить файлы не удалось, API возвращает ошибку и требуется ручное восстановление из backup.
+- При `--no-restart` либо `make_server(..., restart=None)` новые файлы записываются без перезапуска. Это явно отражается в ответе.
 
-Use `openai/<model>` with `api_base: https://relay.fast/v1` for Chat Completions.
-Use `anthropic/<model>` with `api_base: https://relay.fast` for Claude Messages.
-The `/v1` part is appended by the Anthropic client. Discover account models with
-`GET https://relay.fast/v1/models`; being listed does not guarantee a live source.
+Каждый файл заменяется атомарно, но пара YAML не является общей транзакцией: между заменами или при аварийном завершении процесса возможна рассинхронизация. POST-операции сериализованы только внутри одного экземпляра редактора; блокировки от внешнего редактора, второго процесса или CLI нет. Проверки успешного inference и реального хеша загруженной конфигурации после restart-hook нет.
 
-Existing client aliases are preserved:
+YAML записывается через `safe_dump`: комментарии и исходное оформление не сохраняются. Если сначала нажать «Сохранить», а затем «Применить», backup `models.yaml` уже содержит сохранённую редакцию, а не автоматически более старый вариант до «Сохранить».
 
-| Client model | Actual upstream model | Protocol |
+### HTTP API редактора
+
+| Метод | Путь | Назначение |
 | --- | --- | --- |
-| claude-3-5-sonnet-20241022 | kimi-k3 | OpenAI Chat Completions |
-| claude-3-opus-20240229 | claude-haiku-5-5 | Anthropic Messages |
-| claude-3-5-haiku-20251011 | deepseek-v4.1-flash-1017 | OpenAI Chat Completions |
-| claude-3-5-haiku-202609122 | gpt-6-luna | OpenAI Chat Completions |
+| GET | `/` | HTML-форма |
+| GET | `/api/config` | Читает и валидирует `models.yaml` |
+| GET | `/api/catalog` | Ограниченный upstream-каталог, описан ниже |
+| POST | `/api/config` | Сохранение конфигурации |
+| POST | `/api/render` | Возвращает сгенерированный объект, ничего не записывает |
+| POST | `/api/apply` | Backup, запись двух файлов, restart-hook/откат |
 
-The client aliases are labels, not guarantees of the model family actually used.
-`use_chat_completions_url_for_anthropic_messages: true` keeps non-Anthropic
-models on Chat Completions when a client sends `/v1/messages` requests.
-Headroom compression remains enabled globally. Function calling capability
-metadata belongs in `model_info`, not in the upstream request parameters.
+POST принимает сам объект конфигурации с `Content-Type: application/json`, тело до 2 MiB. Проверяются loopback Host и, если Origin указан, точное совпадение с `http://<Host>`. Отдельного токена авторизации и TLS у редактора нет: его модель доступа — локальный интерфейс компьютера.
 
-In the rendered config the provider key is an `os.environ/<NAME>` reference in
-each model's `litellm_params.api_key`; clients authenticate with the separate
-`general_settings.master_key`. Keep YAML and backups private.
+`/api/catalog` не является универсальным обнаружением моделей всех провайдеров. Он выбирает первого провайдера, чей **provider-level** `key_env` задан в окружении редактора, и вызывает `<chat_base>/models` с Bearer-ключом и таймаутом 5 секунд. `api_base`, ключи отдельных деплойментов, anonymous, нативные AWS/Google-каталоги этим endpoint не обслуживаются. В интерфейсе отдельного выбора провайдера для каталога нет.
 
-## Dependencies
+## Headroom: что включено
 
-LiteLLM Proxy 1.106.0 and Headroom 0.41.0 are already installed. Their proxy
-extras require different MCP major versions, so use separate environments:
-`.venv` for Headroom and `.litellm-venv` for LiteLLM. The latter was created with
-`--system-site-packages` to reuse the existing working global LiteLLM packages.
-It therefore depends on the base Python installation remaining available.
-To recreate that environment with the current installation:
+В текущем `models.yaml`:
 
-```powershell
-python -m venv .litellm-venv --system-site-packages
-.\.litellm-venv\Scripts\python.exe -m pip install -r requirements.txt
+```yaml
+compression:
+  enabled: true
+  api_base: http://127.0.0.1:8787
+  timeout: 15
+  unreachable_fallback: fail_open
 ```
 
-Recreate the independent Headroom environment with:
+Рендерер создаёт guardrail `headroom-compression`, `mode: pre_call`, `default_on: true`. LiteLLM передаёт контекст на сжатие перед обращением к модели. При недоступности sidecar политика `fail_open` позволяет продолжить с исходным контекстом; это может увеличить количество отправленных токенов. `fail_closed` требует успешной обработки sidecar. Эти политики касаются интеграции Headroom, а не исправления ошибок провайдера.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-headroom.txt
-```
+`compression.enabled: false` убирает guardrail из сгенерированного конфига. Но `start.ps1` всё равно проверяет наличие Headroom и запускает локальный sidecar. Изменение `compression.api_base` также не меняет фиксированный локальный запуск на 8787. Для удалённого Headroom, требующего авторизации, одной этой настройки недостаточно: схема рендерера не содержит отдельного поля ключа guardrail.
 
-A clean independent LiteLLM environment can instead omit
-`--system-site-packages` and install the same requirements. Do not install
-`litellm[proxy]` into Headroom's environment.
+При запуске устанавливаются `HEADROOM_TELEMETRY=on` для локальных агрегатов, `HEADROOM_BEACON=off` для отключения внешнего beacon и `LITELLM_TELEMETRY=False`. Проверка `/stats` подтвердила локальную telemetry enabled и `anon_telemetry_shipping: false`. Эти настройки не являются запретом вообще всех возможных сетевых обращений библиотек.
 
-## Errors and timeouts
+Headroom стартует с `--ccr-inline-resolve`; остальные неуказанные параметры наследуют defaults установленной версии. Проект не настраивает автоматически все функции Headroom, ML-модели, долговременную память, semantic cache или Redis. Наличие функции в upstream-документации не означает её использование в этой связке. Не все виды контекста сжимаются одинаково, а уменьшение числа токенов само по себе не доказывает сохранение качества решения.
 
-On 2026-10-20 direct requests to relay.fast returned 503 for `kimi-k3` and
-`claude-haiku-5-5`: no source could serve those models. The existing logs also
-contain upstream 504 errors inside SSE streams. Those are upstream failures,
-not evidence of an invalid key or a wrong base URL. DeepSeek and GPT stream
-probes completed after approximately 110 seconds.
+## Таймауты, retries и совместимость
 
-The router now has a 120-second per-attempt timeout, 120-second stream timeout,
-and a 300-second overall request budget. There is at most one configured retry
-for rate limits and server errors; auth, bad-request, not-found and timeout
-errors are not retried by the error-specific policy. Fallback routes for all
-aliases are defined in `models.yaml`. A failure after stream output starts cannot reliably be
-recovered transparently; the client may need to retry the whole turn.
+| Поле `timeouts` | Сейчас | Куда записывает рендерер |
+| --- | --- | --- |
+| `request` | 120 | `litellm_settings.request_timeout` |
+| `stream` | 120 | `router_settings.stream_timeout` |
+| `total` | 300 | `router_settings.timeout` |
+| `retries` | 1 | `router_settings.num_retries` |
+| `cooldown` | 5 | `router_settings.cooldown_time` |
 
-`disable_provider_token_counting`, `ignore_unknown_params`, and
-`pessimistic_cooldown` were removed because LiteLLM 1.106.0 does not read them.
-`cooldown_time` is set under `router_settings`.
-The Anthropic-compatible count-tokens endpoint in this LiteLLM version first
-tries the provider token API. relay.fast's OpenAI `/v1/responses/input_tokens`
-returned 404 in the logs, after which LiteLLM counted tokens locally and
-returned 200. Removing the nonexistent switch does not suppress those warnings;
-local counts are estimates. No installed library files were patched.
+Для времени нужны положительные конечные числа; retries — целое от 0. `total` не может быть меньше `request`. Это настройки LiteLLM, а не отдельный реализованный проектом секундомер: название `total` не гарантирует жёсткий предел 300 секунд на весь HTTP-ответ со сжатием, fallback, retries и чтением потока. Деплоймент может переопределить собственный `timeout` через `params`.
 
-## Verification
+Рендерер всегда добавляет фиксированную `retry_policy`: 0 для Authentication/BadRequest/NotFound/Timeout, 1 для RateLimit/InternalServer/ServiceUnavailable. Изменение `timeouts.retries` не переписывает эту политику. Одна повторная попытка для класса ошибки не означает одну попытку на всю цепочку fallback. Фактическое исполнение зависит от пути запроса и установленной версии LiteLLM.
 
-Targeted diagnostics (results go to `logs/smoke-results.json`):
+Также включены `drop_params: true` и `use_chat_completions_url_for_anthropic_messages: true`. Это допускает удаление неподдерживаемых параметров и перевод запросов `/v1/messages` к OpenAI-моделям через Chat Completions. Полная эквивалентность функций разных API не гарантируется. `supports_function_calling` не доказывает поддержку vision, thinking, Responses API или всех вариантов tool calling.
 
-```powershell
-# Local health and real synthetic compression; no inference charges.
-.\.litellm-venv\Scripts\python.exe smoke_check.py --health-only --compression
-# A small billable request over both client protocols for one alias.
-.\.litellm-venv\Scripts\python.exe smoke_check.py --model YOUR_ALIAS --protocol both
-# Streaming probes reject SSE errors even under HTTP 200, and truncated streams.
-.\.litellm-venv\Scripts\python.exe smoke_check.py --model YOUR_ALIAS --protocol both --stream
-```
+## Диагностика и результаты
 
-Use `--workers`, `--timeout`, `--base-url`, `--headroom-url` and `--root` to
-target another deployment. `--model` can be repeated. Compression measurements
-use synthetic repetitive tool logs and a protected last-user sentinel; their
-savings do not predict every real workload.
+### Без платной генерации
 
 ```powershell
 .\.litellm-venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pip check
 .\.litellm-venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.litellm-venv\Scripts\python.exe smoke_check.py --health-only --compression --timeout 30
+```
+
+Последняя команда проверяет Headroom health, LiteLLM liveness, `/v1/models`, затем сжатие синтетической истории с парой assistant tool_call/tool result и контрольной строкой в последнем user-сообщении. Проверяются снижение заявленного числа токенов и сохранение контрольной строки; качество ответа модели здесь не оценивается.
+
+### Малые платные запросы
+
+```powershell
+# Один настроенный алиас, оба протокола:
+.\.litellm-venv\Scripts\python.exe smoke_check.py --model claude-3-5-haiku-202609122 --protocol both
+# То же с проверкой SSE-потока:
+.\.litellm-venv\Scripts\python.exe smoke_check.py --model claude-3-5-haiku-202609122 --protocol both --stream
+# Без --model будут проверены ВСЕ алиасы из рабочего конфига:
 .\.litellm-venv\Scripts\python.exe smoke_check.py
 ```
 
-The smoke check makes small billable requests for all four aliases and records
-results in `logs/smoke-results.json`. Health and model listing alone do not
-prove that inference is working. A fallback response also does not prove that
-the preferred model recovered. Configuration backups are under `backups/`.
+Запрос содержит `max_tokens: 128` и просьбу ответить `OK`; проверка не требует буквального совпадения ответа с `OK`. Для non-stream проверяется форма ответа и наличие content/choices. Для stream учитываются ошибки SSE даже при HTTP 200 и признак завершения: `message_stop`, `[DONE]` либо `finish_reason`. Это базовая диагностика, а не полная проверка соответствия протоколу или качества генерации.
 
-The unittest suite covers routing validation and rendering, the render CLI, the
-editor API and the one-off migration round-trip.
+| Флаг | Значение по умолчанию / смысл |
+| --- | --- |
+| `--root` | Каталог скрипта; оттуда берутся рабочий конфиг и `.env` |
+| `--base-url` | `http://127.0.0.1:8001`; указывайте корень без завершающего `/v1` |
+| `--headroom-url` | Из guardrail, иначе `http://127.0.0.1:8787` |
+| `--model` | Можно повторять; без него все алиасы рабочего конфига |
+| `--protocol` | `messages` по умолчанию; также `chat`, `both` |
+| `--stream` | Потоковый режим вместо обычного |
+| `--health-only` | Исключает inference; с `--compression` оставляет тест сжатия |
+| `--compression` | Дополнительно тестирует `/v1/compress` |
+| `--workers` | 2 параллельные проверки моделей |
+| `--timeout` | 330 секунд для HTTP POST; health ограничен меньшим из этого значения и 10 секунд |
 
-## Latest live result (2026-10-20)
+HTTP-таймаут клиента не является общим дедлайном всех проверок; в streaming это в том числе ожидание чтения, а не строгий предел длительности потока. Шлюзовой ключ передаётся только на URL LiteLLM, на отдельный Headroom — нет; авторизованный удалённый sidecar требует отдельной настройки вне этой утилиты.
 
-All four aliases passed the non-streaming `/v1/messages` check after restart.
-The subsequent streaming check again received upstream 504 errors inside SSE.
-Therefore the original streaming problem is not resolved by local configuration.
-Use non-streaming requests where supported while relay.fast repairs its source,
-or ask its support about the request IDs in `logs/relay-diagnosis.json`.
-Single-message smoke requests have no older context to compress; a missing
-compression header on those probes does not prove a compression failure.
+Результат каждого завершённого запуска перезаписывает `logs/smoke-results.json`; это не архив истории. Код выхода 0 — все выполненные проверки успешны, 1 — есть проваленная проверка, 2 — ошибка аргументов либо отсутствие необходимых входных данных. Иные необработанные ошибки ввода/вывода не обязаны следовать этой классификации.
+
+Утилита всегда проверяет доступность Headroom, даже если guardrail отключён. HTTP 200 на health не доказывает успешную генерацию или загрузку нужного YAML. Поле `actual_model` берётся из ответа API и может содержать исходный алиас: оно не удостоверяет реальную модель upstream и отсутствие fallback. Сырые provider error bodies не выводятся, но локальные сервисные логи всё равно следует считать частными.
+
+### Что реально проверено 22 октября 2026 года
+
+- 111 unittest-тестов прошли: валидация/рендеринг, CLI, API редактора, откат, миграция и диагностика обычных/потоковых ответов.
+- `pip check` в обоих существующих окружениях завершился без конфликтов зависимостей.
+- Проверены запуск, остановка сервисов, установка двух desktop-обёрток и форма редактора в Chrome; некорректный JSON блокировал сохранение.
+- Для `claude-3-5-haiku-202609122` реальные обычные и streaming-запросы через `/v1/messages` и `/v1/chat/completions` вернули HTTP 200 и прошли критерии утилиты.
+- Синтетический журнал на `/v1/compress`: 6 983 → 93 токена, сохранено 6 890, контрольная строка сохранилась. Это искусственный повторяющийся журнал, а не прогноз экономии на произвольных рабочих диалогах.
+- Другие четыре алиаса, все сторонние native-адаптеры, tool calling, vision, Responses API, нагрузка и длительная стабильность последним live-прогоном не подтверждены.
+
+Часть `tests/test_setup.py` намеренно проверяет конкретный текущий relay.fast-конфиг: API key references и openai/anthropic-маршруты. При замене его на native или anonymous эти утверждения нужно привести в соответствие новой конфигурации; это не универсальные тесты любого провайдера.
+
+## Если что-то не работает
+
+| Симптом | Что проверить |
+| --- | --- |
+| Изменили модель, но шлюз ведёт себя по-старому | «Применить» или `start.ps1 -Restart`; обычный запуск может сохранить работающий процесс |
+| Поменяли `.env`, но ключ остался старым | Приоритет унаследованного окружения; очистите/обновите нужную переменную в запускающем терминале и перезапустите процессы |
+| `401` / `403` | Различайте ключ шлюза и upstream-ключ; проверяйте окружение процесса, не публикуя значения |
+| Ошибка render | Исправьте `models.yaml`; старый рабочий файл не заменяется при validation error |
+| `/api/catalog` не видит нового провайдера | Ограничения `chat_base` и provider-level env; это не каталог всех native-адаптеров |
+| Headroom недоступен | Проверьте локальный процесс и `logs/headroom_*.err.log`; fail_open относится к запросам, но launcher всё равно требует Headroom |
+| HTTP 200, но поток закончился ошибкой | Запустите `smoke_check.py --stream`; статус HTTP сам по себе не исключает SSE error |
+| `503` / `504` от upstream | Возможна недоступность источника провайдера; fallback и retries не гарантируют восстановления |
+| Неудачное применение | Смотрите сообщение об откате и `backups/apply_*`; восстановите согласованную пару YAML, затем выполните restart |
+| «Отказано в доступе» при остановке | Для `Get-CimInstance` и остановки процессов нужны права текущего Windows-пользователя; защита хоста может ограничивать их |
+
+20 октября в ранних диагностических прогонах наблюдались upstream 503 у Kimi/Claude и 504 внутри SSE; это исторические результаты, а не утверждение об их состоянии сегодня. Успех одного алиаса 22 октября также не доказывает устранение всех прежних upstream-сбоев. После начала выдачи потока прозрачное восстановление через другую модель ненадёжно; клиенту может потребоваться повторить весь запрос.
+
+Count-tokens может сначала обращаться к upstream token API, получить 404 и перейти к локальной оценке. Удалённые ранее параметры `disable_provider_token_counting`, `ignore_unknown_params`, `pessimistic_cooldown` не реализовывали желаемое переключение в установленной версии. Код установленных библиотек проектом не патчится.
+
+## Файлы и границы проекта
+
+| Файл / каталог | Роль |
+| --- | --- |
+| `routing.py`, `render.py` | Схема, validation, генерация и запись рабочего конфига |
+| `models.yaml` | Реальные текущие маршруты без значений ключей |
+| `models.multi-provider.example.yaml`, `.env.example`, `litellm-config.example.yaml` | Примеры для настройки |
+| `editor.py`, `editor_page.html` | Локальный API и форма |
+| `start.ps1`, `stop.ps1`, два `.bat` | Жизненный цикл процессов на Windows |
+| `install-desktop-launchers.ps1` | Установка локальных desktop-обёрток |
+| `smoke_check.py` | Проверки API и синтетического сжатия |
+| `tests/` | Автоматические тесты без платной генерации |
+| `tools/migrate_config.py` | Старый одноразовый импорт; не универсальный конвертер новой схемы |
+| `docs/superpowers/` | Исторический дизайн и план исходной реализации; актуальное руководство — этот README |
+
+`tools/migrate_config.py` перезаписывает `models.yaml`, предполагает старые openai/anthropic-маршруты, задаёт `RELAY_FAST_API_KEY`, не переносит произвольные новые параметры и удаляет замыкающие fallback-циклы с предупреждением. Не используйте его для обратного преобразования современной multi-provider-конфигурации без отдельной копии и проверки результата.
+
+В проекте не настроены база пользователей/virtual keys, долговременный учёт затрат, жёсткий бюджет расходов, автоматическая ротация логов/backup, внешняя система мониторинга, CI-проверки или multi-host-развёртывание. Эти возможности нельзя считать включёнными только потому, что LiteLLM или Headroom в принципе их поддерживают.
+
+## Документация upstream
+
+Код этой версии проекта определяет доступные поля; upstream-документация может описывать более новые версии и функции вне текущей интеграции.
+
+- [LiteLLM: Config.yaml](https://docs.litellm.ai/docs/proxy/configs)
+- [LiteLLM: OpenAI-compatible endpoints](https://docs.litellm.ai/docs/providers/openai_compatible)
+- [LiteLLM: routing](https://docs.litellm.ai/docs/routing)
+- [LiteLLM: Headroom guardrail](https://docs.litellm.ai/docs/proxy/headroom)
+- [Headroom: proxy и sidecar API](https://docs.headroomlabs.ai/docs/proxy)
+- [relay.fast: документация](https://relay.fast/docs)
