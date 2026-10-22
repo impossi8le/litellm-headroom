@@ -2,13 +2,28 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
+import os
+import sys
 import time
 import requests
 import yaml
 
 BASE='http://127.0.0.1:8001'
 cfg=yaml.safe_load(Path(__file__).with_name('litellm-config.yaml').read_text(encoding='utf-8'))
-HEADERS={'anthropic-version':'2023-06-01','Authorization':'Bearer '+cfg['general_settings']['master_key']}
+
+
+def resolve(value):
+    """Config holds os.environ/NAME references; read the variable, never the literal."""
+    if isinstance(value, str) and value.startswith('os.environ/'):
+        return os.environ.get(value[len('os.environ/'):], '')
+    return value or ''
+
+
+master = resolve(cfg['general_settings']['master_key'])
+if not master:
+    sys.exit('LITELLM_MASTER_KEY is not set: export it or put it in .env before running the smoke check.')
+
+HEADERS={'anthropic-version':'2023-06-01','Authorization':'Bearer '+master}
 
 def check(model):
     started = time.monotonic()
@@ -37,6 +52,6 @@ if __name__=='__main__':
         print(url, r.status_code,flush=True)
         r.raise_for_status()
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results=list(pool.map(check,[m['model_name'] for m in cfg['model_list']]))
+        results=list(pool.map(check, sorted({m['model_name'] for m in cfg['model_list']})))
     Path(__file__).with_name('logs').joinpath('smoke-results.json').write_text(json.dumps(results,indent=2),encoding='utf-8')
     raise SystemExit(0 if all(r['ok'] for r in results) else 1)

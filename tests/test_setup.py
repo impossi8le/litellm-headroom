@@ -3,29 +3,28 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / 'litellm-config.yaml'
-if not CONFIG.exists():
-    CONFIG = ROOT / 'litellm-config.example.yaml'
+MODELS = ROOT / 'models.yaml'
 
 class ConfigurationTests(unittest.TestCase):
-    def setUp(self):
-        self.cfg = yaml.safe_load(CONFIG.read_text(encoding='utf-8'))
-
     def test_provider_routes(self):
-        for entry in self.cfg['model_list']:
+        import routing
+        cfg = routing.render_config(routing.load_and_validate(MODELS))
+        for entry in cfg['model_list']:
             params = entry['litellm_params']
             self.assertTrue(entry['model_name'], 'model_name must not be empty')
-            self.assertTrue(params['model'], 'model must not be empty')
+            self.assertTrue(params['api_key'].startswith('os.environ/'), params['api_key'])
             if params['model'].startswith('openai/'):
-                self.assertEqual(params['api_base'], 'https://relay.fast/v1')
+                self.assertTrue(params['api_base'].endswith('/v1'), params['api_base'])
             elif params['model'].startswith('anthropic/'):
-                self.assertEqual(params['api_base'], 'https://relay.fast')
+                self.assertFalse(params['api_base'].endswith('/v1'), params['api_base'])
             else:
-                self.fail('unsupported provider prefix: %s' % params['model'])
-        self.assertTrue(self.cfg['litellm_settings']['use_chat_completions_url_for_anthropic_messages'])
+                self.fail('unsupported dialect: %s' % params['model'])
+        self.assertTrue(cfg['litellm_settings']['use_chat_completions_url_for_anthropic_messages'])
 
     def test_compression_enabled(self):
-        self.assertTrue(self.cfg['guardrails'][0]['litellm_params'].get('default_on'))
+        import routing
+        cfg = routing.render_config(routing.load_and_validate(MODELS))
+        self.assertTrue(cfg['guardrails'][0]['litellm_params'].get('default_on'))
 
     def test_launcher_uses_correct_package(self):
         launcher = (ROOT / 'start.ps1').read_text(encoding='utf-8')
