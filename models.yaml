@@ -1,0 +1,66 @@
+# Source of truth for routing. render.py turns this into litellm-config.yaml.
+# Holds no credentials: key_env names an environment variable.
+providers:
+  relay-fast:
+    key_env: RELAY_FAST_API_KEY
+    chat_base: https://relay.fast/v1
+    messages_base: https://relay.fast
+timeouts:
+  request: 120
+  stream: 120
+  total: 300
+  retries: 1
+  cooldown: 5
+aliases:
+- name: claude-3-5-sonnet-20241022
+  deployments:
+  - provider: relay-fast
+    model: kimi-k3
+    dialect: openai
+    order: 1
+  fallbacks:
+  - claude-3-5-haiku-20251011
+  - claude-3-5-haiku-202609122
+  model_info:
+    supports_function_calling: true
+- name: claude-3-opus-20240229
+  deployments:
+  - provider: relay-fast
+    model: claude-haiku-5-5
+    dialect: anthropic
+    order: 1
+  fallbacks:
+  - claude-3-5-haiku-202609122
+  - claude-3-5-haiku-20251011
+  model_info:
+    supports_function_calling: true
+- name: claude-3-5-haiku-20251011
+  deployments:
+  - provider: relay-fast
+    model: deepseek-v4.1-flash-1017
+    dialect: openai
+    order: 1
+  fallbacks:
+  - claude-3-5-haiku-202609122
+  - claude-3-5-haiku-20251111
+  model_info:
+    supports_function_calling: true
+- name: claude-3-5-haiku-20251111
+  deployments:
+  - provider: relay-fast
+    model: deepseek-v4.1-flash
+    dialect: openai
+    order: 1
+  fallbacks: []
+  model_info:
+    supports_function_calling: true
+- name: claude-3-5-haiku-202609122
+  deployments:
+  - provider: relay-fast
+    model: gpt-6-luna
+    dialect: openai
+    order: 1
+  fallbacks:
+  - claude-3-5-haiku-20251111
+  model_info:
+    supports_function_calling: true
