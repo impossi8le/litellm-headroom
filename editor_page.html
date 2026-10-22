@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headroom — маршрутизация моделей</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #1c2430;
+    --muted: #5b6675;
+    --line: #d8dde5;
+    --accent: #1f5fbf;
+    --ok: #1c7a45;
+    --bad: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0 0 4rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  header.toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+  }
+  header.toolbar h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger { color: var(--bad); border-color: #e5c3c0; }
+  button.restore, button.draft {
+    font-size: 11px;
+    padding: 0.15rem 0.4rem;
+    color: var(--muted);
+    background: #f2f4f7;
+    border-color: transparent;
+  }
+  button.draft { color: var(--accent); }
+  main { max-width: 1100px; margin: 1rem auto; padding: 0 1rem; }
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1rem 1.1rem 1.2rem;
+    margin-bottom: 1rem;
+  }
+  .panel h2 { font-size: 0.95rem; margin: 0 0 0.75rem; font-weight: 600; }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.75rem 0.85rem;
+    margin-bottom: 0.75rem;
+    background: #fcfdff;
+  }
+  .card > header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+  .grid { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .field { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  input, select {
+    font: inherit;
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--ink);
+  }
+  input:focus, select:focus { outline: 2px solid rgba(31, 95, 191, 0.25); border-color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-end; }
+  .row > .field { flex: 1 1 150px; }
+  .subhead { font-size: 12px; color: var(--muted); margin: 0.75rem 0 0.35rem; }
+  .deployment, .fallback-row {
+    display: grid;
+    gap: 0.5rem;
+    align-items: end;
+    padding: 0.45rem 0;
+    border-top: 1px dashed var(--line);
+  }
+  .deployment { grid-template-columns: 1.2fr 1.6fr 0.8fr 0.5fr 1.2fr auto; }
+  .fallback-row { grid-template-columns: 1fr auto; }
+  .status { max-width: 1100px; margin: 0.75rem auto 0; padding: 0 1rem; font-size: 13px; color: var(--muted); min-height: 1.2em; }
+  .status.ok { color: var(--ok); }
+  .status.error { color: var(--bad); }
+  .errors { margin: 0.5rem 0 0; padding: 0.5rem 0.65rem; border-left: 3px solid var(--bad); background: #fdf1f0; color: var(--bad); font-size: 12.5px; }
+  .errors ul { margin: 0; padding-left: 1.1rem; }
+  .muted { color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); margin: 0 0 0.6rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header class="toolbar">
+  <h1>Маршрутизация моделей</h1>
+  <div class="actions">
+    <button id="btn-add" type="button">Добавить модель</button>
+    <button id="btn-save" type="button">Сохранить</button>
+    <button id="btn-apply" type="button" class="primary">Применить</button>
+  </div>
+</header>
+
+<div id="status" class="status" role="status" aria-live="polite"></div>
+<div id="global-errors" class="errors" role="alert" hidden></div>
+
+<main>
+  <section id="new-alias-panel" class="panel" hidden>
+    <h2>Новая модель</h2>
+    <p class="hint">По умолчанию: первый провайдер, диалект openai, порядок 1, модель и fallbacks пустые.</p>
+    <form id="new-alias-form">
+      <div class="grid">
+        <label class="field"><span class="field-label">Имя модели</span>
+          <input id="new-name" type="text" autocomplete="off" placeholder="например gpt-6-luna"></label>
+        <label class="field"><span class="field-label">Провайдер</span>
+          <select id="new-provider"></select></label>
+        <label class="field"><span class="field-label">Модель провайдера</span>
+          <input id="new-model" type="text" autocomplete="off" placeholder="например kimi-k3"></label>
+        <label class="field"><span class="field-label">Диалект</span>
+          <select id="new-dialect">
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+          </select></label>
+        <label class="field"><span class="field-label">Порядок</span>
+          <input id="new-order" type="number" min="1" step="1" value="1"></label>
+        <label class="field"><span class="field-label">Fallback (необязательно)</span>
+          <input id="new-fallback" type="text" autocomplete="off" list="alias-names"></label>
+      </div>
+      <div class="row" style="margin-top:0.75rem">
+        <button type="submit" class="primary">Создать</button>
+        <button type="button" id="btn-cancel-add">Отмена</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Провайдеры</h2>
+    <p class="hint">Ключи здесь не вводятся: указывается только имя env-переменной, в которой лежит ключ.</p>
+    <div id="providers"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Алиасы</h2>
+    <datalist id="alias-names"></datalist>
+    <div id="aliases"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = null;      // working copy edited by the UI
+  var diskState = null;  // last snapshot read from models.yaml on disk
+  var lastErrors = [];   // errors from the last failed save/apply
+
+  var statusEl = document.getElementById("status");
+  var globalErrorsEl = document.getElementById("global-errors");
+
+  // -- small helpers ----------------------------------------------------
+
+  function clone(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        var value = attrs[key];
+        if (value == null || value === false) { return; }
+        if (key === "text") { node.textContent = value; }
+        else if (key === "className") { node.className = value; }
+        else if (key === "dataset") {
+          Object.keys(value).forEach(function (name) { node.dataset[name] = value[name]; });
+        } else if (key === "onClick") { node.addEventListener("click", value); }
+        else if (value === true) { node.setAttribute(key, ""); }
+        else { node.setAttribute(key, String(value)); }
+      });
+    }
+    (children || []).forEach(function (child) {
+      if (child == null) { return; }
+      node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+    });
+    return node;
+  }
+
+  function getPath(obj, path) {
+    var parts = path.split(".");
+    var cur = obj;
+    for (var i = 0; i < parts.length; i++) {
+      if (cur == null || typeof cur !== "object") { return undefined; }
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  function setPath(obj, path, value) {
+    var parts = path.split(".");
+    var cur = obj;
+    for (var i = 0; i < parts.length - 1; i++) {
+      var key = parts[i];
+      if (cur[key] == null || typeof cur[key] !== "object") {
+        cur[key] = /^\d+$/.test(parts[i + 1]) ? [] : {};
+      }
+      cur = cur[key];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+
+  function providerNames() {
+    return Object.keys(state && state.providers ? state.providers : {});
+  }
+
+  function firstProvider() {
+    var names = providerNames();
+    return names.length ? names[0] : "";
+  }
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text || "";
+    statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function showGlobalErrors(errors) {
+    globalErrorsEl.textContent = "";
+    if (!errors || !errors.length) { globalErrorsEl.hidden = true; return; }
+    var list = el("ul");
+    errors.forEach(function (message) { list.appendChild(el("li", { text: message })); });
+    globalErrorsEl.appendChild(list);
+    globalErrorsEl.hidden = false;
+  }
+
+  // -- localStorage: "what I typed last time" ---------------------------
+
+  function remember(alias, field, value) {
+    if (!alias || !field) { return; }
+    try { localStorage.setItem(alias + "." + field, value); } catch (err) { /* private mode */ }
+  }
+
+  function recall(alias, field) {
+    if (!alias || !field) { return null; }
+    try { return localStorage.getItem(alias + "." + field); } catch (err) { return null; }
+  }
+
+  // -- field builders ---------------------------------------------------
+
+  function restoreButton(opts) {
+    var button = el("button", {
+      type: "button",
+      className: "restore",
+      text: "вернуть сохранённое",
+      title: "Подставить значение, которое сейчас лежит в models.yaml",
+      dataset: { restorePath: opts.path, alias: opts.alias, field: opts.field }
+    });
+    button.addEventListener("click", function () { restoreFromDisk(button); });
+    return button;
+  }
+
+  function draftButton(opts) {
+    var stored = recall(opts.alias, opts.field);
+    if (stored === null) { return null; }
+    var onDisk = getPath(diskState, opts.path);
+    var diskText = onDisk == null ? "" : String(onDisk);
+    if (stored === diskText) { return null; }
+    var button = el("button", {
+      type: "button",
+      className: "draft",
+      text: "черновик: " + (stored === "" ? "(пусто)" : stored),
+      title: "Значение, введённое в прошлый раз (localStorage)",
+      dataset: { draftPath: opts.path, alias: opts.alias, field: opts.field }
+    });
+    button.addEventListener("click", function () {
+      setPath(state, opts.path, stored);
+      var input = button.parentNode.querySelector("input, select");
+      if (input) { input.value = stored; }
+      setStatus("Подставлен черновик из localStorage.");
+    });
+    return button;
+  }
+
+  function field(opts) {
+    var wrap = el("label", { className: "field" });
+    wrap.appendChild(el("span", { className: "field-label", text: opts.label }));
+    var input;
+    if (opts.options) {
+      input = el("select");
+      opts.options.forEach(function (option) {
+        var node = el("option", { value: option, text: option });
+        if (String(opts.value == null ? "" : opts.value) === option) { node.selected = true; }
+        input.appendChild(node);
+      });
+    } else {
+      input = el("input", {
+        type: opts.type || "text",
+        value: opts.value == null ? "" : String(opts.value),
+        placeholder: opts.placeholder || null,
+        list: opts.list || null,
+        autocomplete: "off"
+      });
+    }
+    if (opts.numeric) { input.dataset.numeric = "1"; }
+    input.dataset.path = opts.path;
+    input.dataset.alias = opts.alias;
+    input.dataset.field = opts.field;
+    wrap.appendChild(input);
+    wrap.appendChild(restoreButton(opts));
+    var draft = draftButton(opts);
+    if (draft) { wrap.appendChild(draft); }
+    return wrap;
+  }
+
+  function restoreFromDisk(button) {
+    var path = button.dataset.restorePath;
+    var value = getPath(diskState, path);
+    if (value === undefined) { value = ""; }
+    setPath(state, path, value);
+    var input = button.parentNode.querySelector("input, select");
+    if (input) { input.value = value == null ? "" : String(value); }
+    setStatus("Подставлено значение из models.yaml: " + (value === "" ? "(пусто)" : String(value)));
+  }
+
+  // -- providers --------------------------------------------------------
+
+  function renameProvider(oldName, newName) {
+    newName = (newName || "").trim();
+    if (!newName || newName === oldName) { return false; }
+    if (Object.prototype.hasOwnProperty.call(state.providers, newName)) {
+      setStatus("Провайдер «" + newName + "» уже существует.", "error");
+      return false;
+    }
+    var rebuilt = {};
+    Object.keys(state.providers).forEach(function (name) {
+      rebuilt[name === oldName ? newName : name] = state.providers[name];
+    });
+    state.providers = rebuilt;
+    (state.aliases || []).forEach(function (alias) {
+      (alias.deployments || []).forEach(function (dep) {
+        if (dep && dep.provider === oldName) { dep.provider = newName; }
+      });
+    });
+    return true;
+  }
+
+  function renderProviders() {
+    var host = document.getElementById("providers");
+    host.textContent = "";
+    var names = providerNames();
+    if (!names.length) {
+      host.appendChild(el("p", { className: "muted", text: "Провайдеров нет." }));
+      return;
+    }
+    names.forEach(function (name) {
+      var provider = state.providers[name] || {};
+      var card = el("div", { className: "card" });
+      var head = el("header");
+      var nameWrap = el("label", { className: "field" });
+      nameWrap.appendChild(el("span", { className: "field-label", text: "Имя провайдера" }));
+      var nameInput = el("input", { type: "text", value: name, autocomplete: "off" });
+      nameInput.dataset.kind = "provider-name";
+      nameInput.dataset.original = name;
+      nameInput.dataset.alias = name;
+      nameInput.dataset.field = "provider_name";
+      nameWrap.appendChild(nameInput);
+      var restoreName = el("button", {
+        type: "button", className: "restore", text: "вернуть сохранённое",
+        dataset: { restoreProvider: name }
+      });
+      restoreName.addEventListener("click", function () { nameInput.value = name; });
+      nameWrap.appendChild(restoreName);
+      head.appendChild(nameWrap);
+      card.appendChild(head);
+
+      var grid = el("div", { className: "grid" });
+      grid.appendChild(field({
+        label: "key_env (имя переменной)",
+        path: "providers." + name + ".key_env",
+        alias: name, field: "key_env",
+        value: provider.key_env,
+        placeholder: "RELAY_FAST_API_KEY"
+      }));
+      grid.appendChild(field({
+        label: "chat_base",
+        path: "providers." + name + ".chat_base",
+        alias: name, field: "chat_base",
+        value: provider.chat_base,
+        placeholder: "https://example/v1"
+      }));
+      grid.appendChild(field({
+        label: "messages_base",
+        path: "providers." + name + ".messages_base",
+        alias: name, field: "messages_base",
+        value: provider.messages_base,
+        placeholder: "https://example"
+      }));
+      card.appendChild(grid);
+      host.appendChild(card);
+    });
+  }
+
+  // -- aliases ----------------------------------------------------------
+
+  function aliasKey(alias) {
+    return alias && typeof alias.name === "string" ? alias.name : "";
+  }
+
+  function aliasCard(alias, index) {
+    var key = aliasKey(alias);
+    var card = el("div", { className: "card alias-card", dataset: { aliasName: key, aliasIndex: String(index) } });
+
+    var head = el("header");
+    var nameField = el("label", { className: "field" });
+    nameField.appendChild(el("span", { className: "field-label", text: "Имя алиаса" }));
+    var nameInput = el("input", { type: "text", value: key, autocomplete: "off", placeholder: "имя модели для клиента" });
+    nameInput.dataset.path = "aliases." + index + ".name";
+    nameInput.dataset.alias = key;
+    nameInput.dataset.field = "name";
+    nameField.appendChild(nameInput);
+    nameField.appendChild(restoreButton({ path: "aliases." + index + ".name", alias: key, field: "name" }));
+    head.appendChild(nameField);
+
+    var deleteButton = el("button", { type: "button", className: "danger", text: "Удалить алиас" });
+    deleteButton.dataset.action = "delete-alias";
+    deleteButton.dataset.index = String(index);
+    head.appendChild(deleteButton);
+    card.appendChild(head);
+
+    var errors = el("div", { className: "errors", dataset: { errorFor: key } });
+    errors.hidden = true;
+    card.appendChild(errors);
+
+    // deployments
+    card.appendChild(el("p", { className: "subhead", text: "Деплойменты" }));
+    var deployments = Array.isArray(alias.deployments) ? alias.deployments : [];
+    deployments.forEach(function (dep, depIndex) {
+      var row = el("div", { className: "deployment" });
+      row.appendChild(field({
+        label: "Провайдер",
+        path: "aliases." + index + ".deployments." + depIndex + ".provider",
+        alias: key, field: "deployments." + depIndex + ".provider",
+        value: dep && dep.provider,
+        options: providerNames()
+      }));
+      row.appendChild(field({
+        label: "Модель",
+        path: "aliases." + index + ".deployments." + depIndex + ".model",
+        alias: key, field: "deployments." + depIndex + ".model",
+        value: dep && dep.model,
+        placeholder: "kimi-k3"
+      }));
+      row.appendChild(field({
+        label: "Диалект",
+        path: "aliases." + index + ".deployments." + depIndex + ".dialect",
+        alias: key, field: "deployments." + depIndex + ".dialect",
+        value: (dep && dep.dialect) || "openai",
+        options: ["openai", "anthropic"]
+      }));
+      row.appendChild(field({
+        label: "Порядок",
+        path: "aliases." + index + ".deployments." + depIndex + ".order",
+        alias: key, field: "deployments." + depIndex + ".order",
+        value: dep && dep.order != null ? dep.order : 1,
+        type: "number", numeric: true
+      }));
+      row.appendChild(field({
+        label: "key_env (необязательно)",
+        path: "aliases." + index + ".deployments." + depIndex + ".key_env",
+        alias: key, field: "deployments." + depIndex + ".key_env",
+        value: dep && dep.key_env,
+        placeholder: "наследуется от провайдера"
+      }));
+      var remove = el("button", { type: "button", className: "danger", text: "×", title: "Удалить деплоймент" });
+      remove.dataset.action = "remove-deployment";
+      remove.dataset.index = String(index);
+      remove.dataset.dep = String(depIndex);
+      row.appendChild(remove);
+      card.appendChild(row);
+    });
+
+    var addDep = el("button", { type: "button", text: "Добавить деплоймент" });
+    addDep.dataset.action = "add-deployment";
+    addDep.dataset.index = String(index);
+    card.appendChild(addDep);
+
+    // fallbacks
+    card.appendChild(el("p", { className: "subhead", text: "Fallbacks" }));
+    var fallbacks = Array.isArray(alias.fallbacks) ? alias.fallbacks : [];
+    fallbacks.forEach(function (target, fbIndex) {
+      var row = el("div", { className: "fallback-row" });
+      row.appendChild(field({
+        label: "Алиас-приёмник",
+        path: "aliases." + index + ".fallbacks." + fbIndex,
+        alias: key, field: "fallbacks." + fbIndex,
+        value: target, list: "alias-names", placeholder: "имя существующего алиаса"
+      }));
+      var remove = el("button", { type: "button", className: "danger", text: "×", title: "Удалить fallback" });
+      remove.dataset.action = "remove-fallback";
+      remove.dataset.index = String(index);
+      remove.dataset.fb = String(fbIndex);
+      row.appendChild(remove);
+      card.appendChild(row);
+    });
+
+    var addFb = el("button", { type: "button", text: "Добавить fallback" });
+    addFb.dataset.action = "add-fallback";
+    addFb.dataset.index = String(index);
+    card.appendChild(addFb);
+
+    // model_info
+    var infoWrap = el("label", { className: "row", style: "margin-top:0.75rem;gap:0.4rem" });
+    var infoBox = el("input", { type: "checkbox" });
+    infoBox.style.width = "auto";
+    infoBox.checked = !!(alias.model_info && alias.model_info.supports_function_calling);
+    infoBox.dataset.path = "aliases." + index + ".model_info.supports_function_calling";
+    infoBox.dataset.kind = "checkbox";
+    infoWrap.appendChild(infoBox);
+    infoWrap.appendChild(el("span", { text: "supports_function_calling" }));
+    card.appendChild(infoWrap);
+
+    return card;
+  }
+
+  function renderAliases() {
+    var host = document.getElementById("aliases");
+    host.textContent = "";
+    var aliases = Array.isArray(state.aliases) ? state.aliases : [];
+    if (!aliases.length) {
+      host.appendChild(el("p", { className: "muted", text: "Алиасов нет. Нажмите «Добавить модель»." }));
+      return;
+    }
+    aliases.forEach(function (alias, index) { host.appendChild(aliasCard(alias, index)); });
+    applyErrors();
+  }
+
+  function renderDatalist() {
+    var list = document.getElementById("alias-names");
+    list.textContent = "";
+    (state.aliases || []).forEach(function (alias) {
+      var name = aliasKey(alias).trim();
+      if (!name) { return; }
+      list.appendChild(el("option", { value: name }));
+    });
+  }
+
+  function renderProviderSelects() {
+    var select = document.getElementById("new-provider");
+    var current = select.value;
+    select.textContent = "";
+    providerNames().forEach(function (name) {
+      select.appendChild(el("option", { value: name, text: name }));
+    });
+    if (current && providerNames().indexOf(current) !== -1) { select.value = current; }
+  }
+
+  function renderAll() {
+    renderProviders();
+    renderAliases();
+    renderDatalist();
+    renderProviderSelects();
+  }
+
+  // -- errors -----------------------------------------------------------
+
+  function applyErrors() {
+    document.querySelectorAll("[data-error-for]").forEach(function (node) {
+      node.textContent = "";
+      node.hidden = true;
+    });
+    var unattached = [];
+    lastErrors.forEach(function (message) {
+      var attached = false;
+      var match = /^alias '([^']*)'/.exec(message) || /^alias "([^"]*)"/.exec(message);
+      var aliasName = match ? match[1] : null;
+      if (aliasName !== null) {
+        document.querySelectorAll("[data-error-for]").forEach(function (node) {
+          if (!attached && node.dataset.errorFor === aliasName) {
+            node.appendChild(el("div", { text: message }));
+            node.hidden = false;
+            attached = true;
+          }
+        });
+      }
+      if (!attached) { unattached.push(message); }
+    });
+    showGlobalErrors(unattached);
+  }
+
+  // -- reading the form back into the working copy ----------------------
+
+  function coerce(input) {
+    var raw = input.value;
+    if (input.dataset.kind === "checkbox") { return input.checked; }
+    if (input.dataset.numeric === "1") {
+      if (raw === "") { return null; }
+      var number = Number(raw);
+      return isNaN(number) ? raw : number;
+    }
+    return raw;
+  }
+
+  function syncFromDom() {
+    document.querySelectorAll("[data-path]").forEach(function (input) {
+      var path = input.dataset.path;
+      var value = coerce(input);
+      if (input.dataset.kind === "checkbox" && !value) {
+        var parts = path.split(".");
+        var leaf = parts[parts.length - 1];
+        if (leaf === "supports_function_calling") {
+          var ownerParts = parts.slice(0, -2);
+          var info = getPath(state, parts.slice(0, -1).join("."));
+          if (info) { delete info[leaf]; }
+          if (info && Object.keys(info).length === 0) {
+            var owner = getPath(state, ownerParts.join("."));
+            if (owner) { delete owner[parts[parts.length - 2]]; }
+          }
+          return;
+        }
+      }
+      setPath(state, path, value);
+      remember(input.dataset.alias, input.dataset.field, input.value);
+    });
+  }
+
+  function providerRenames() {
+    var renames = [];
+    document.querySelectorAll("[data-kind='provider-name']").forEach(function (input) {
+      var next = input.value.trim();
+      remember(input.dataset.alias, input.dataset.field, input.value);
+      if (next && next !== input.dataset.original) { renames.push([input.dataset.original, next]); }
+    });
+    return renames;
+  }
+
+  function collect() {
+    // Renames run first: data-path values embed the old provider name.
+    var ok = true;
+    providerRenames().forEach(function (pair) {
+      if (!renameProvider(pair[0], pair[1])) { ok = false; }
+    });
+    syncFromDom();
+    return ok;
+  }
+
+  // -- server calls -----------------------------------------------------
+
+  function request(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (response) {
+      return response.text().then(function (text) {
+        var payload = null;
+        try { payload = text ? JSON.parse(text) : null; } catch (err) { payload = { error: text }; }
+        return { ok: response.ok, status: response.status, payload: payload };
+      });
+    });
+  }
+
+  function describeFailure(result) {
+    if (result.payload && Array.isArray(result.payload.errors)) { return result.payload.errors; }
+    if (result.payload && result.payload.error) { return [String(result.payload.error)]; }
+    return ["HTTP " + result.status];
+  }
+
+  function save() {
+    if (!collect()) { return; }
+    setStatus("Сохранение…");
+    request("/api/config", state).then(function (result) {
+      if (result.ok) {
+        lastErrors = [];
+        setStatus("Сохранено в models.yaml.", "ok");
+        return load(true);
+      }
+      lastErrors = describeFailure(result);
+      applyErrors();
+      setStatus("Не сохранено: " + lastErrors.length + " ошиб(ок).", "error");
+    }).catch(function (err) { setStatus("Сеть: " + err.message, "error"); });
+  }
+
+  function applyChanges() {
+    if (!collect()) { return; }
+    setStatus("Применение…");
+    request("/api/apply", state).then(function (result) {
+      if (result.ok) {
+        lastErrors = [];
+        setStatus("Применено: оба YAML обновлены, LiteLLM перезапущен.", "ok");
+        return load(true);
+      }
+      lastErrors = describeFailure(result);
+      applyErrors();
+      setStatus("Не применено: " + lastErrors.length + " ошиб(ок).", "error");
+    }).catch(function (err) { setStatus("Сеть: " + err.message, "error"); });
+  }
+
+  function load(keepStatus) {
+    return fetch("/api/config", { headers: { "Accept": "application/json" } })
+      .then(function (response) {
+        return response.text().then(function (text) {
+          var payload = null;
+          try { payload = text ? JSON.parse(text) : null; } catch (err) { payload = { error: text }; }
+          if (!response.ok) {
+            lastErrors = describeFailure({ status: response.status, payload: payload });
+            showGlobalErrors(lastErrors);
+            setStatus("models.yaml не прочитан.", "error");
+            return;
+          }
+          state = payload;
+          diskState = clone(payload);
+          lastErrors = [];
+          showGlobalErrors([]);
+          renderAll();
+          if (!keepStatus) {
+            setStatus("Загружено: " + (state.aliases || []).length + " алиас(ов), "
+                      + Object.keys(state.providers || {}).length + " провайдер(ов).");
+          }
+        });
+      })
+      .catch(function (err) { setStatus("Сеть: " + err.message, "error"); });
+  }
+
+  // -- toolbar / new alias ----------------------------------------------
+
+  function resetNewForm() {
+    document.getElementById("new-name").value = "";
+    document.getElementById("new-model").value = "";
+    document.getElementById("new-fallback").value = "";
+    document.getElementById("new-order").value = "1";
+    document.getElementById("new-dialect").value = "openai";
+    renderProviderSelects();
+    var select = document.getElementById("new-provider");
+    select.value = firstProvider();
+  }
+
+  function showNewForm(show) {
+    document.getElementById("new-alias-panel").hidden = !show;
+    if (show) {
+      resetNewForm();
+      document.getElementById("new-name").focus();
+    }
+  }
+
+  function createAlias(event) {
+    event.preventDefault();
+    var name = document.getElementById("new-name").value.trim();
+    var model = document.getElementById("new-model").value;
+    var provider = document.getElementById("new-provider").value;
+    var dialect = document.getElementById("new-dialect").value;
+    var order = Number(document.getElementById("new-order").value || 1);
+    var fallback = document.getElementById("new-fallback").value.trim();
+    if (!name) { setStatus("Укажите имя модели.", "error"); return; }
+
+    var alias = {
+      name: name,
+      deployments: [{ provider: provider, model: model, dialect: dialect, order: order }],
+      fallbacks: fallback ? [fallback] : [],
+      model_info: { supports_function_calling: true }
+    };
+    if (!Array.isArray(state.aliases)) { state.aliases = []; }
+    state.aliases.push(alias);
+    remember(name, "name", name);
+    renderAll();
+    showNewForm(false);
+    setStatus("Добавлено: " + name + ". Нажмите «Сохранить», чтобы записать в models.yaml.");
+  }
+
+  function onAliasClick(event) {
+    var button = event.target.closest("button[data-action]");
+    if (!button) { return; }
+    var index = Number(button.dataset.index);
+    var alias = state.aliases[index];
+    if (!alias) { return; }
+    if (button.dataset.action === "delete-alias") {
+      state.aliases.splice(index, 1);
+    } else if (button.dataset.action === "add-deployment") {
+      if (!Array.isArray(alias.deployments)) { alias.deployments = []; }
+      alias.deployments.push({ provider: firstProvider(), model: "", dialect: "openai", order: 1 });
+    } else if (button.dataset.action === "remove-deployment") {
+      alias.deployments.splice(Number(button.dataset.dep), 1);
+    } else if (button.dataset.action === "add-fallback") {
+      if (!Array.isArray(alias.fallbacks)) { alias.fallbacks = []; }
+      alias.fallbacks.push("");
+    } else if (button.dataset.action === "remove-fallback") {
+      alias.fallbacks.splice(Number(button.dataset.fb), 1);
+    } else {
+      return;
+    }
+    renderAll();
+  }
+
+  document.getElementById("btn-add").addEventListener("click", function () { showNewForm(true); });
+  document.getElementById("btn-cancel-add").addEventListener("click", function () { showNewForm(false); });
+  document.getElementById("btn-save").addEventListener("click", save);
+  document.getElementById("btn-apply").addEventListener("click", applyChanges);
+  document.getElementById("new-alias-form").addEventListener("submit", createAlias);
+  document.getElementById("aliases").addEventListener("click", onAliasClick);
+  document.getElementById("new-name").addEventListener("input", function () {
+    remember(this.value.trim(), "name", this.value);
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>
