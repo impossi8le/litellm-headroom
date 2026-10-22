@@ -73,12 +73,19 @@ function Start-ServiceProcess([string]$Name, [string]$Exe, [string[]]$ServiceArg
 try {
     if (!(Test-Path -LiteralPath $headroom)) { throw "Headroom is missing: $headroom" }
     if (!(Test-Path -LiteralPath $litellm)) { throw "LiteLLM is missing. Run python -m venv .litellm-venv --system-site-packages, then .litellm-venv\Scripts\python.exe -m pip install -r requirements.txt" }
-    if (!(Test-Path -LiteralPath $config)) { throw "Config is missing: $config" }
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     Import-EnvFile $envFile
+    # models.yaml is the source of truth; litellm-config.yaml is generated and
+    # gitignored, so render it first and only then require it to exist.
     if (Test-Path -LiteralPath $models) {
         & $litellm (Join-Path $PSScriptRoot 'render.py') --root $PSScriptRoot
         if ($LASTEXITCODE -ne 0) { throw 'Config render failed: see the errors above' }
+    }
+    if (!(Test-Path -LiteralPath $config)) {
+        if (Test-Path -LiteralPath $models) {
+            throw "Config was not generated from models.yaml: $config"
+        }
+        throw "Config is missing: $config (and models.yaml was not found either)"
     }
     if ($Restart) { Stop-LiteLLM }
     Remove-Item Env:LITELLM_LOG -ErrorAction SilentlyContinue

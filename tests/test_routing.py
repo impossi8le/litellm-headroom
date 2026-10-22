@@ -91,6 +91,24 @@ class ValidateTests(unittest.TestCase):
         errors = routing.validate(cfg)
         self.assertTrue(any("mapping" in e for e in errors), errors)
 
+    def test_deployment_order_null_rejected(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["aliases"][0]["deployments"][0]["order"] = None
+        errors = routing.validate(cfg)
+        self.assertTrue(any("order" in e for e in errors), errors)
+
+    def test_deployment_order_string_rejected(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["aliases"][0]["deployments"][0]["order"] = "1"
+        errors = routing.validate(cfg)
+        self.assertTrue(any("order" in e for e in errors), errors)
+
+    def test_deployment_order_zero_rejected(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["aliases"][0]["deployments"][0]["order"] = 0
+        errors = routing.validate(cfg)
+        self.assertTrue(any("order" in e for e in errors), errors)
+
     def test_load_and_validate_raises_with_all_errors(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "models.yaml"

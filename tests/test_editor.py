@@ -47,10 +47,13 @@ class EditorTests(unittest.TestCase):
         self.server.server_close()
         self.tmp.cleanup()
 
-    def post(self, path, payload):
+    def post(self, path, payload, headers=None):
+        merged = {"Content-Type": "application/json"}
+        if headers:
+            merged.update(headers)
         req = urllib.request.Request(self.base + path,
                                      data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers=merged)
         return urllib.request.urlopen(req, timeout=5)
 
     def test_get_config_returns_models(self):
@@ -139,3 +142,31 @@ class EditorTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req, timeout=5)
         self.assertEqual(ctx.exception.code, 403)
+
+    def test_rejects_foreign_origin(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.post("/api/config", CFG, headers={"Origin": "https://evil.example"})
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_rejects_non_json_content_type(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.post("/api/config", CFG, headers={"Content-Type": "text/plain"})
+        self.assertEqual(ctx.exception.code, 415)
+
+    def test_accepts_loopback_origin_with_json(self):
+        port = self.server.server_address[1]
+        response = self.post("/api/config", CFG,
+                             headers={"Origin": "http://127.0.0.1:%d" % port})
+        self.assertEqual(response.status, 200)
+
+    def test_apply_without_restart_reports_null(self):
+        body = json.loads(self.post("/api/apply", CFG).read())
+        self.assertTrue(body["rendered"])
+        self.assertIsNone(body["restarted"])
+
+    def test_apply_with_successful_restart_reports_true(self):
+        self.server.shutdown(); self.server.server_close()
+        self.start(editor.make_server(self.root, port=0, restart=lambda: True))
+        body = json.loads(self.post("/api/apply", CFG).read())
+        self.assertTrue(body["rendered"])
+        self.assertIs(body["restarted"], True)

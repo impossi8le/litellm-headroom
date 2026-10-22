@@ -10,12 +10,44 @@ import yaml
 
 BASE='http://127.0.0.1:8001'
 cfg=yaml.safe_load(Path(__file__).with_name('litellm-config.yaml').read_text(encoding='utf-8'))
+ENV_FILE=Path(__file__).with_name('.env')
+
+
+def read_env_file(path):
+    """Parse NAME=value pairs from a .env file; blanks and # comments are skipped."""
+    values = {}
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith('#'):
+            continue
+        if trimmed.startswith('export '):
+            trimmed = trimmed[len('export '):].lstrip()
+        name, sep, value = trimmed.partition('=')
+        name = name.strip()
+        if not sep or not name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        values[name] = value
+    return values
 
 
 def resolve(value):
-    """Config holds os.environ/NAME references; read the variable, never the literal."""
+    """Config holds os.environ/NAME references; read the variable, never the literal.
+
+    A variable that is unset falls back to the .env file next to this script:
+    after bat.bat the key lives only in the child process, not in a fresh shell.
+    """
     if isinstance(value, str) and value.startswith('os.environ/'):
-        return os.environ.get(value[len('os.environ/'):], '')
+        name = value[len('os.environ/'):]
+        if name in os.environ:
+            return os.environ[name]
+        return read_env_file(ENV_FILE).get(name, '')
     return value or ''
 
 

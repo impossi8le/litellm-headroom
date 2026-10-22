@@ -1,14 +1,20 @@
 """Local HTTP API for editing and applying models.yaml.
 
-Run a server with ``make_server(root)``; it binds to the loopback interface by
-default and refuses requests whose Host header is not a loopback name.
+Run ``python editor.py`` (or ``make_server(root)``) to serve the editor; it
+binds to the loopback interface by default and refuses requests whose Host
+header is not a loopback name, as well as cross-origin requests and non-JSON
+POST bodies.
 """
+import argparse
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -18,6 +24,38 @@ import routing
 
 ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 CATALOG_TIMEOUT = 5
+
+
+def _origin_allowed(raw):
+    """True when an Origin header names a loopback host (or is absent)."""
+    if raw is None:
+        return True
+    try:
+        hostname = urllib.parse.urlsplit(raw).hostname
+    except ValueError:
+        return False
+    return hostname in ALLOWED_HOSTS
+
+
+def _is_json_content_type(raw):
+    if not raw:
+        return False
+    return raw.split(";", 1)[0].strip().lower() == "application/json"
+
+
+def make_restart(root):
+    """Return a hook that restarts LiteLLM via ``start.ps1 -Restart``."""
+    root = Path(root).resolve()
+
+    def restart():
+        command = [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(root / "start.ps1"), "-Restart",
+        ]
+        completed = subprocess.run(command, cwd=str(root))
+        return completed.returncode == 0
+
+    return restart
 
 
 def _write_models(path, models):
@@ -52,6 +90,24 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return False
         return hostname in ALLOWED_HOSTS
+
+    def _guard(self):
+        """Reject foreign hosts, cross-origin requests and non-JSON bodies.
+
+        Returns True when the request may proceed; otherwise a response has
+        already been sent.
+        """
+        if not self._host_allowed():
+            self._json(403, {"error": "forbidden host"})
+            return False
+        if not _origin_allowed(self.headers.get("Origin")):
+            self._json(403, {"error": "forbidden origin"})
+            return False
+        if self.command == "POST" and not _is_json_content_type(
+                self.headers.get("Content-Type")):
+            self._json(415, {"error": "Content-Type must be application/json"})
+            return False
+        return True
 
     def _send(self, status, body, content_type):
         self.send_response(status)
@@ -97,8 +153,8 @@ class _Handler(BaseHTTPRequestHandler):
     # -- routes -----------------------------------------------------------
 
     def do_GET(self):
-        if not self._host_allowed():
-            return self._json(403, {"error": "forbidden host"})
+        if not self._guard():
+            return
         path = urllib.parse.urlsplit(self.path).path
         if path == "/":
             return self._page()
@@ -109,8 +165,8 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self._host_allowed():
-            return self._json(403, {"error": "forbidden host"})
+        if not self._guard():
+            return
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/config":
             return self._post_config()
@@ -168,12 +224,23 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             return self._json(500, {"error": "apply failed: %s" % exc})
         restart = self.server.restart
-        if restart is not None:
-            try:
-                restart()
-            except Exception as exc:  # noqa: BLE001 - report, don't crash the request
-                return self._json(500, {"error": "restart failed: %s" % exc})
-        self._json(200, {"ok": True})
+        if restart is None:
+            return self._json(200, {
+                "rendered": True,
+                "restarted": None,
+                "restart_error": None,
+            })
+        try:
+            restarted = restart() is not False
+            restart_error = None if restarted else "restart hook reported failure"
+        except Exception as exc:  # noqa: BLE001 - report, don't crash the request
+            restarted = False
+            restart_error = "restart failed: %s" % exc
+        self._json(200, {
+            "rendered": True,
+            "restarted": restarted,
+            "restart_error": restart_error,
+        })
 
     def _catalog(self):
         models, error = self._load()
@@ -226,3 +293,36 @@ def make_server(root, host="127.0.0.1", port=8788, restart=None):
     server.root = Path(root).resolve()
     server.restart = restart
     return server
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Local editor for models.yaml.")
+    parser.add_argument("--root", default=str(Path(__file__).resolve().parent),
+                        help="directory holding models.yaml (default: the script directory)")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8788)
+    parser.add_argument("--no-restart", action="store_true",
+                        help="do not restart LiteLLM after «Применить»")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="do not open the editor page in a browser")
+    args = parser.parse_args(argv)
+
+    root = Path(args.root).resolve()
+    restart = None if args.no_restart else make_restart(root)
+    server = make_server(root, host=args.host, port=args.port, restart=restart)
+    host, port = server.server_address[:2]
+    url = "http://%s:%d/" % (host, port)
+    print("Editor: %s (root %s)" % (url, root), flush=True)
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

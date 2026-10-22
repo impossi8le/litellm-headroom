@@ -87,6 +87,10 @@ def validate(models):
                 errors.append("alias '%s': deployment entry: expected a mapping, got %s"
                               % (name, _type_name(dep)))
                 continue
+            order = dep.get("order")
+            if isinstance(order, bool) or not isinstance(order, int) or order < 1:
+                errors.append("alias '%s': deployment order must be a positive integer (got %r)"
+                              % (name, order))
             dialect = dep.get("dialect")
             if dialect not in DIALECTS:
                 errors.append("alias '%s': unknown dialect %r (expected one of %s)"
@@ -153,7 +157,7 @@ def _cycles(aliases, known):
         for nxt in graph.get(node, []):
             if colour.get(nxt) == GREY:
                 loop = stack[stack.index(nxt):] + [nxt]
-                errors.append("cycle: " + " -> ".join(loop))
+                errors.append("aliases: cycle: " + " -> ".join(loop))
             elif colour.get(nxt) == WHITE:
                 visit(nxt, stack)
         stack.pop()

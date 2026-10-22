@@ -372,6 +372,14 @@
     input.dataset.alias = opts.alias;
     input.dataset.field = opts.field;
     wrap.appendChild(input);
+    if (opts.numeric) {
+      // A cleared or invalid number must never be written as null: the old
+      // value stays in state and this hint explains why nothing changed.
+      var hint = el("span", { className: "hint", text: "" });
+      hint.hidden = true;
+      input.dataset.orderHint = "1";
+      wrap.appendChild(hint);
+    }
     wrap.appendChild(restoreButton(opts));
     var draft = draftButton(opts);
     if (draft) { wrap.appendChild(draft); }
@@ -844,16 +852,48 @@
     var raw = input.value;
     if (input.dataset.kind === "checkbox") { return input.checked; }
     if (input.dataset.numeric === "1") {
-      if (raw === "") { return null; }
-      var number = Number(raw);
-      return isNaN(number) ? raw : number;
+      var order = orderValue(input);
+      return order === null ? null : order;
     }
     return raw;
+  }
+
+  // «Порядок» is an integer >= 1; anything else (empty, "1.5", "abc", 0) is
+  // invalid and must not reach the state as null or a string.
+  function orderValue(input) {
+    var raw = (input.value || "").trim();
+    if (raw === "") { return null; }
+    var number = Number(raw);
+    if (!isFinite(number) || Math.floor(number) !== number || number < 1) { return null; }
+    return number;
+  }
+
+  function showOrderHint(input, message) {
+    var hint = input.parentNode ? input.parentNode.querySelector(".hint") : null;
+    if (hint) {
+      hint.textContent = message || "";
+      hint.hidden = !message;
+    }
+    if (message) { input.dataset.invalid = "1"; } else { delete input.dataset.invalid; }
   }
 
   function syncFromDom() {
     document.querySelectorAll("[data-path]").forEach(function (input) {
       var path = input.dataset.path;
+      if (input.dataset.numeric === "1") {
+        var order = orderValue(input);
+        if (order === null) {
+          // Keep the previous value instead of writing null/NaN/"".
+          var previous = getPath(state, path);
+          showOrderHint(input, "Нужно целое число ≥ 1 — оставлено прежнее значение"
+                              + (previous == null ? "" : " " + previous) + ".");
+          return;
+        }
+        showOrderHint(input, "");
+        setPath(state, path, order);
+        remember(input.dataset.alias, input.dataset.field, input.value);
+        return;
+      }
       var value = coerce(input);
       if (input.dataset.kind === "checkbox" && !value) {
         var parts = path.split(".");
@@ -946,8 +986,19 @@
     request("/api/apply", state).then(function (result) {
       if (result.ok) {
         lastErrors = [];
-        setStatus("Применено: оба YAML обновлены, LiteLLM перезапущен."
-                  + (lastNotice ? " " + lastNotice : ""), "ok");
+        var payload = result.payload || {};
+        var message;
+        var kind = "ok";
+        if (payload.restarted === true) {
+          message = "Применено: оба YAML обновлены, LiteLLM перезапущен.";
+        } else if (payload.restarted === null) {
+          message = "Файлы записаны. Перезапустите LiteLLM: start.ps1 -Restart";
+        } else {
+          message = "Файлы записаны, но перезапуск не удался: "
+                    + (payload.restart_error || "неизвестная ошибка");
+          kind = "error";
+        }
+        setStatus(message + (lastNotice ? " " + lastNotice : ""), kind);
         return load(true);
       }
       lastErrors = describeFailure(result);

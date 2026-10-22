@@ -7,6 +7,7 @@ litellm-config.original.yaml
 # Atomic-write leftovers (render.py / editor.py use mkstemp next to the target)
 litellm-config.yaml.tmp
 litellm-config.yaml.*.tmp
+models.yaml.*.tmp
 
 # Virtual environments
 .venv/
@@ -25,6 +26,7 @@ __pycache__/
 .claude/settings.local.json
 .vscode/
 .idea/
+.playwright-mcp/
 
 # Build artifacts
 *.whl
