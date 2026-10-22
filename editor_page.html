@@ -68,6 +68,16 @@
     margin-bottom: 1rem;
   }
   .panel h2 { font-size: 0.95rem; margin: 0 0 0.75rem; font-weight: 600; }
+  .panel-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+  .panel-head h2 { margin: 0; }
+  .panel-head button { font-size: 12px; padding: 0.25rem 0.6rem; }
   .card {
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -161,7 +171,10 @@
   </section>
 
   <section class="panel">
-    <h2>Провайдеры</h2>
+    <div class="panel-head">
+      <h2>Провайдеры</h2>
+      <button id="btn-add-provider" type="button">Добавить провайдера</button>
+    </div>
     <p class="hint">Ключи здесь не вводятся: указывается только имя env-переменной, в которой лежит ключ.</p>
     <div id="providers"></div>
   </section>
@@ -180,6 +193,7 @@
   var state = null;      // working copy edited by the UI
   var diskState = null;  // last snapshot read from models.yaml on disk
   var lastErrors = [];   // errors from the last failed save/apply
+  var lastNotice = "";   // non-fatal note (e.g. an unnamed provider was skipped)
 
   var statusEl = document.getElementById("status");
   var globalErrorsEl = document.getElementById("global-errors");
@@ -235,8 +249,22 @@
     cur[parts[parts.length - 1]] = value;
   }
 
-  function providerNames() {
+  // Rows added with «Добавить провайдера» live in state.providers under a
+  // placeholder key until the user types a real name. The placeholder is never
+  // written to models.yaml: unnamed rows are dropped before saving.
+  var NEW_PROVIDER_PREFIX = "__new_provider__";
+
+  function isPlaceholderProvider(name) {
+    return typeof name === "string" && name.indexOf(NEW_PROVIDER_PREFIX) === 0;
+  }
+
+  function providerKeys() {
     return Object.keys(state && state.providers ? state.providers : {});
+  }
+
+  // Names offered in <select> elements: unnamed placeholder rows are excluded.
+  function providerNames() {
+    return providerKeys().filter(function (name) { return !isPlaceholderProvider(name); });
   }
 
   function firstProvider() {
@@ -262,6 +290,8 @@
 
   function remember(alias, field, value) {
     if (!alias || !field) { return; }
+    // Unnamed provider rows have no key yet: nothing to remember them under.
+    if (alias.indexOf("__new_provider__") === 0) { return; }
     try { localStorage.setItem(alias + "." + field, value); } catch (err) { /* private mode */ }
   }
 
@@ -317,6 +347,17 @@
         if (String(opts.value == null ? "" : opts.value) === option) { node.selected = true; }
         input.appendChild(node);
       });
+      // Marks a select whose options are provider names, so newly added
+      // providers can be pushed into it without re-rendering the alias cards.
+      if (opts.providerOptions) {
+        input.dataset.providerOptions = "1";
+        var currentValue = opts.value == null ? "" : String(opts.value);
+        if (currentValue && opts.options.indexOf(currentValue) === -1) {
+          var orphan = el("option", { value: currentValue, text: currentValue + " (нет в списке)" });
+          orphan.selected = true;
+          input.appendChild(orphan);
+        }
+      }
     } else {
       input = el("input", {
         type: opts.type || "text",
@@ -369,34 +410,223 @@
     return true;
   }
 
+  function providerCardError(input, message) {
+    var card = input.closest(".card");
+    if (!card) { return; }
+    var box = card.querySelector("[data-provider-error]");
+    if (!box) { return; }
+    box.textContent = message || "";
+    box.hidden = !message;
+  }
+
+  // Re-point one provider card's field paths after its name changed, so
+  // «вернуть сохранённое» and the draft buttons keep addressing the same row.
+  function retargetProviderCard(input, name) {
+    var card = input.closest(".card");
+    if (!card) { return; }
+    var remove = card.querySelector("[data-action='delete-provider']");
+    if (remove) { remove.dataset.provider = name; }
+    card.dataset.provider = name;
+    card.querySelectorAll("[data-path], [data-restore-path], [data-draft-path]").forEach(function (node) {
+      ["path", "restorePath", "draftPath"].forEach(function (attr) {
+        var value = node.dataset[attr];
+        if (!value) { return; }
+        var dot = value.lastIndexOf(".");
+        if (dot === -1) { return; }
+        node.dataset[attr] = "providers." + name + value.slice(dot);
+      });
+      if (node.dataset.field) {
+        node.dataset.alias = name;
+        remember(name, node.dataset.field, node.value == null ? "" : node.value);
+      }
+    });
+  }
+
+  // Provider name edits rename the key in the working copy immediately, so a
+  // freshly added provider shows up in the deployment <select> without saving.
+  function onProviderNameInput(input) {
+    var next = input.value.trim();
+    var original = input.dataset.original;
+    if (next === original) { providerCardError(input, ""); return; }
+    if (!next) {
+      if (input.dataset.fresh === "1") {
+        // Row created in this session: collect() simply leaves it out.
+        providerCardError(input, "");
+      } else {
+        providerCardError(input, "Имя провайдера пустое. Верните сохранённое или удалите строку.");
+      }
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(state.providers, next)) {
+      providerCardError(input, "Провайдер «" + next + "» уже существует.");
+      return;
+    }
+    providerCardError(input, "");
+    syncFromDom();  // typed field values land under the previous key first
+    if (!renameProvider(original, next)) { return; }
+    input.dataset.original = next;
+    input.dataset.alias = next;
+    remember(next, "provider_name", input.value);
+    retargetProviderCard(input, next);
+    syncProviderSelects(original, next);
+  }
+
+  // Empty names are never written: unnamed new rows are dropped, while an
+  // existing provider whose name was cleared blocks the save instead.
+  function providerNameErrors() {
+    var bad = 0;
+    document.querySelectorAll("[data-kind='provider-name']").forEach(function (input) {
+      if (input.value.trim()) { return; }
+      if (input.dataset.fresh === "1" || isPlaceholderProvider(input.dataset.original)) { return; }
+      providerCardError(input, "Имя провайдера пустое. Верните сохранённое или удалите строку.");
+      bad += 1;
+    });
+    return bad;
+  }
+
+  function pruneUnnamedProviders() {
+    var dropped = 0;
+    document.querySelectorAll("[data-kind='provider-name']").forEach(function (input) {
+      if (input.value.trim()) { return; }
+      var original = input.dataset.original;
+      if (!(input.dataset.fresh === "1" || isPlaceholderProvider(original))) { return; }
+      if (Object.prototype.hasOwnProperty.call(state.providers, original)) {
+        delete state.providers[original];
+        dropped += 1;
+      }
+    });
+    return dropped;
+  }
+
+  function syncProviderSelects(oldName, newName) {
+    var names = providerNames();
+    document.querySelectorAll("select[data-provider-options]").forEach(function (select) {
+      var current = select.value;
+      if (oldName && current === oldName && newName) { current = newName; }
+      select.textContent = "";
+      names.forEach(function (name) {
+        select.appendChild(el("option", { value: name, text: name }));
+      });
+      if (current && names.indexOf(current) === -1) {
+        // Keep a reference the provider list no longer offers rather than
+        // silently rewriting it to the first entry.
+        select.appendChild(el("option", { value: current, text: current + " (нет в списке)" }));
+      }
+      if (current) { select.value = current; }
+    });
+  }
+
+  function addProvider() {
+    if (!state || typeof state !== "object") { return; }
+    if (!state.providers || typeof state.providers !== "object" || Array.isArray(state.providers)) {
+      state.providers = {};
+    }
+    syncFromDom();  // keep edits already typed into other provider cards
+    var seq = 1;
+    var key;
+    do {
+      key = NEW_PROVIDER_PREFIX + seq;
+      seq += 1;
+    } while (Object.prototype.hasOwnProperty.call(state.providers, key));
+    state.providers[key] = { key_env: "", chat_base: "", messages_base: "" };
+    renderProviders();
+    syncProviderSelects();
+    var inputs = document.querySelectorAll("[data-kind='provider-name']");
+    var last = inputs[inputs.length - 1];
+    if (last) { last.focus(); }
+    setStatus("Добавлен провайдер. Впишите имя и адреса, затем «Сохранить».");
+  }
+
+  function deleteProvider(button) {
+    var card = button.closest(".card");
+    var nameInput = card ? card.querySelector("[data-kind='provider-name']") : null;
+    // The row may have been renamed since it was rendered, so the current
+    // name input wins over the key captured in data-provider.
+    var name = nameInput && nameInput.value.trim() ? nameInput.value.trim()
+             : (nameInput && nameInput.dataset.original) || button.dataset.provider;
+    if (!Object.prototype.hasOwnProperty.call(state.providers, name)) {
+      name = button.dataset.provider;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state.providers, name)) { return; }
+    var users = [];
+    (state.aliases || []).forEach(function (alias) {
+      (alias && alias.deployments || []).forEach(function (dep) {
+        if (dep && dep.provider === name) { users.push(aliasKey(alias) || "(без имени)"); }
+      });
+    });
+    if (users.length) {
+      var message = "Провайдер используется в деплойментах: " + users.join(", ") + ".";
+      var box = card ? card.querySelector("[data-provider-error]") : null;
+      if (box) { box.textContent = message; box.hidden = false; }
+      setStatus(message, "error");
+      return;
+    }
+    syncFromDom();  // keep edits already typed into other provider cards
+    delete state.providers[name];
+    renderProviders();
+    syncProviderSelects();
+    setStatus("Провайдер «" + (isPlaceholderProvider(name) ? "(без имени)" : name)
+              + "» удалён из формы. Нажмите «Сохранить», чтобы записать в models.yaml.");
+  }
+
+  function onProviderClick(event) {
+    var button = event.target.closest("button[data-action]");
+    if (!button || button.dataset.action !== "delete-provider") { return; }
+    deleteProvider(button);
+  }
+
   function renderProviders() {
     var host = document.getElementById("providers");
     host.textContent = "";
-    var names = providerNames();
+    var names = providerKeys();
     if (!names.length) {
-      host.appendChild(el("p", { className: "muted", text: "Провайдеров нет." }));
+      host.appendChild(el("p", { className: "muted", text: "Провайдеров нет. Нажмите «Добавить провайдера»." }));
       return;
     }
     names.forEach(function (name) {
       var provider = state.providers[name] || {};
+      var placeholder = isPlaceholderProvider(name);
       var card = el("div", { className: "card" });
       var head = el("header");
       var nameWrap = el("label", { className: "field" });
+      nameWrap.style.flex = "1 1 260px";
       nameWrap.appendChild(el("span", { className: "field-label", text: "Имя провайдера" }));
-      var nameInput = el("input", { type: "text", value: name, autocomplete: "off" });
+      var nameInput = el("input", {
+        type: "text",
+        value: placeholder ? "" : name,
+        placeholder: "например openrouter",
+        autocomplete: "off"
+      });
       nameInput.dataset.kind = "provider-name";
       nameInput.dataset.original = name;
       nameInput.dataset.alias = name;
       nameInput.dataset.field = "provider_name";
+      if (placeholder) { nameInput.dataset.fresh = "1"; }
+      nameInput.addEventListener("input", function () { onProviderNameInput(nameInput); });
       nameWrap.appendChild(nameInput);
       var restoreName = el("button", {
         type: "button", className: "restore", text: "вернуть сохранённое",
+        title: "Вернуть имя, которое сейчас лежит в models.yaml",
         dataset: { restoreProvider: name }
       });
-      restoreName.addEventListener("click", function () { nameInput.value = name; });
+      restoreName.addEventListener("click", function () {
+        nameInput.value = placeholder ? "" : name;
+        onProviderNameInput(nameInput);
+      });
       nameWrap.appendChild(restoreName);
       head.appendChild(nameWrap);
+
+      var deleteProviderButton = el("button", {
+        type: "button", className: "danger", text: "Удалить провайдера"
+      });
+      deleteProviderButton.dataset.action = "delete-provider";
+      deleteProviderButton.dataset.provider = name;
+      head.appendChild(deleteProviderButton);
       card.appendChild(head);
+
+      var cardErrors = el("div", { className: "errors", dataset: { providerError: "1" } });
+      cardErrors.hidden = true;
+      card.appendChild(cardErrors);
 
       var grid = el("div", { className: "grid" });
       grid.appendChild(field({
@@ -466,7 +696,8 @@
         path: "aliases." + index + ".deployments." + depIndex + ".provider",
         alias: key, field: "deployments." + depIndex + ".provider",
         value: dep && dep.provider,
-        options: providerNames()
+        options: providerNames(),
+        providerOptions: true
       }));
       row.appendChild(field({
         label: "Модель",
@@ -570,13 +801,8 @@
   }
 
   function renderProviderSelects() {
-    var select = document.getElementById("new-provider");
-    var current = select.value;
-    select.textContent = "";
-    providerNames().forEach(function (name) {
-      select.appendChild(el("option", { value: name, text: name }));
-    });
-    if (current && providerNames().indexOf(current) !== -1) { select.value = current; }
+    document.getElementById("new-provider").dataset.providerOptions = "1";
+    syncProviderSelects();
   }
 
   function renderAll() {
@@ -665,6 +891,15 @@
       if (!renameProvider(pair[0], pair[1])) { ok = false; }
     });
     syncFromDom();
+    lastNotice = "";
+    if (providerNameErrors()) {
+      setStatus("Не сохранено: у провайдера пустое имя.", "error");
+      ok = false;
+    }
+    var dropped = pruneUnnamedProviders();
+    if (dropped) {
+      lastNotice = "Провайдер без имени не сохранён (" + dropped + ").";
+    }
     return ok;
   }
 
@@ -696,7 +931,7 @@
     request("/api/config", state).then(function (result) {
       if (result.ok) {
         lastErrors = [];
-        setStatus("Сохранено в models.yaml.", "ok");
+        setStatus(lastNotice ? "Сохранено в models.yaml. " + lastNotice : "Сохранено в models.yaml.", "ok");
         return load(true);
       }
       lastErrors = describeFailure(result);
@@ -711,7 +946,8 @@
     request("/api/apply", state).then(function (result) {
       if (result.ok) {
         lastErrors = [];
-        setStatus("Применено: оба YAML обновлены, LiteLLM перезапущен.", "ok");
+        setStatus("Применено: оба YAML обновлены, LiteLLM перезапущен."
+                  + (lastNotice ? " " + lastNotice : ""), "ok");
         return load(true);
       }
       lastErrors = describeFailure(result);
@@ -816,6 +1052,8 @@
   }
 
   document.getElementById("btn-add").addEventListener("click", function () { showNewForm(true); });
+  document.getElementById("btn-add-provider").addEventListener("click", addProvider);
+  document.getElementById("providers").addEventListener("click", onProviderClick);
   document.getElementById("btn-cancel-add").addEventListener("click", function () { showNewForm(false); });
   document.getElementById("btn-save").addEventListener("click", save);
   document.getElementById("btn-apply").addEventListener("click", applyChanges);
