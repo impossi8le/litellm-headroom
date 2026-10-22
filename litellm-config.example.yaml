@@ -1,0 +1,74 @@
+# Copy to litellm-config.yaml and set RELAY_FAST_API_KEY / LITELLM_MASTER_KEY
+# in the environment. Never commit real keys.
+# relay.fast: OpenAI-compatible models use /v1; Anthropic uses the host root.
+# Keep these aliases stable for existing Claude clients.
+model_list:
+- model_name: claude-3-5-sonnet-20241022
+  litellm_params:
+    model: openai/kimi-k3
+    api_base: https://relay.fast/v1
+    api_key: os.environ/RELAY_FAST_API_KEY
+  model_info:
+    supports_function_calling: true
+- model_name: claude-3-opus-20240229
+  litellm_params:
+    model: anthropic/claude-haiku-5-5
+    api_base: https://relay.fast
+    api_key: os.environ/RELAY_FAST_API_KEY
+  model_info:
+    supports_function_calling: true
+- model_name: claude-3-5-haiku-20251011
+  litellm_params:
+    model: openai/deepseek-v4.1-flash-1017
+    api_base: https://relay.fast/v1
+    api_key: os.environ/RELAY_FAST_API_KEY
+  model_info:
+    supports_function_calling: true
+- model_name: claude-3-5-haiku-20251111
+  litellm_params:
+    model: openai/deepseek-v4.1-flash
+    api_base: https://relay.fast/v1
+    api_key: os.environ/RELAY_FAST_API_KEY
+  model_info:
+    supports_function_calling: true
+- model_name: claude-3-5-haiku-202609122
+  litellm_params:
+    model: openai/gpt-6-luna
+    api_base: https://relay.fast/v1
+    api_key: os.environ/RELAY_FAST_API_KEY
+  model_info:
+    supports_function_calling: true
+litellm_settings:
+  use_chat_completions_url_for_anthropic_messages: true
+  drop_params: true
+  request_timeout: 120
+general_settings:
+  disable_ui: true
+  master_key: os.environ/LITELLM_MASTER_KEY
+guardrails:
+- guardrail_name: headroom-compression
+  litellm_params:
+    guardrail: headroom
+    mode: pre_call
+    api_base: http://127.0.0.1:8787
+    default_on: true
+router_settings:
+  num_retries: 1
+  fallbacks:
+  - claude-3-5-sonnet-20241022:
+    - claude-3-5-haiku-20251011
+    - claude-3-5-haiku-202609122
+  - claude-3-opus-20240229:
+    - claude-3-5-haiku-202609122
+    - claude-3-5-haiku-20251011
+  timeout: 300
+  stream_timeout: 120
+  cooldown_time: 5
+  retry_policy:
+    AuthenticationErrorRetries: 0
+    BadRequestErrorRetries: 0
+    NotFoundErrorRetries: 0
+    TimeoutErrorRetries: 0
+    RateLimitErrorRetries: 1
+    InternalServerErrorRetries: 1
+    ServiceUnavailableErrorRetries: 1

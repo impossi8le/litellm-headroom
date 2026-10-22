@@ -1,0 +1,2 @@
+litellm[proxy]==1.106.0
+requests==2.34.2

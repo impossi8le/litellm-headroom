@@ -1,0 +1,27 @@
+# Local configuration with the real provider key
+litellm-config.yaml
+litellm-config1.yaml
+litellm-config.original.yaml
+.env
+
+# Virtual environments
+.venv/
+.litellm-venv/
+
+# Runtime output
+logs/
+backups/
+__pycache__/
+*.pyc
+
+# Headroom local state
+.headroom/
+
+# Editor / agent local settings
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# Build artifacts
+*.whl
+validate.log
