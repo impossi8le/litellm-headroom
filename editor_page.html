@@ -254,6 +254,13 @@
   // written to models.yaml: unnamed rows are dropped before saving.
   var NEW_PROVIDER_PREFIX = "__new_provider__";
 
+  // Alias buttons that change state and then re-render the form. Anything
+  // else (draft/restore helpers) must not trigger a sync-then-render pass.
+  var MUTATING_ALIAS_ACTIONS = [
+    "delete-alias", "add-deployment", "remove-deployment",
+    "add-fallback", "remove-fallback"
+  ];
+
   function isPlaceholderProvider(name) {
     return typeof name === "string" && name.indexOf(NEW_PROVIDER_PREFIX) === 0;
   }
@@ -1056,6 +1063,9 @@
 
   function createAlias(event) {
     event.preventDefault();
+    // Capture edits already typed into the existing cards before the new
+    // alias is added and the whole form is re-rendered.
+    syncFromDom();
     var name = document.getElementById("new-name").value.trim();
     var model = document.getElementById("new-model").value;
     var provider = document.getElementById("new-provider").value;
@@ -1084,20 +1094,23 @@
     var index = Number(button.dataset.index);
     var alias = state.aliases[index];
     if (!alias) { return; }
-    if (button.dataset.action === "delete-alias") {
+    var action = button.dataset.action;
+    if (MUTATING_ALIAS_ACTIONS.indexOf(action) === -1) { return; }
+    // Every branch below mutates state and re-renders the whole form, so
+    // typed-but-unsynced edits must land in state first or they are lost.
+    syncFromDom();
+    if (action === "delete-alias") {
       state.aliases.splice(index, 1);
-    } else if (button.dataset.action === "add-deployment") {
+    } else if (action === "add-deployment") {
       if (!Array.isArray(alias.deployments)) { alias.deployments = []; }
       alias.deployments.push({ provider: firstProvider(), model: "", dialect: "openai", order: 1 });
-    } else if (button.dataset.action === "remove-deployment") {
+    } else if (action === "remove-deployment") {
       alias.deployments.splice(Number(button.dataset.dep), 1);
-    } else if (button.dataset.action === "add-fallback") {
+    } else if (action === "add-fallback") {
       if (!Array.isArray(alias.fallbacks)) { alias.fallbacks = []; }
       alias.fallbacks.push("");
-    } else if (button.dataset.action === "remove-fallback") {
-      alias.fallbacks.splice(Number(button.dataset.fb), 1);
     } else {
-      return;
+      alias.fallbacks.splice(Number(button.dataset.fb), 1);
     }
     renderAll();
   }
