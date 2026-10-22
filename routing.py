@@ -37,6 +37,10 @@ def load_models(path):
     return data
 
 
+def _type_name(value):
+    return type(value).__name__
+
+
 def validate(models):
     errors = []
     providers = models.get("providers") or {}
@@ -44,13 +48,22 @@ def validate(models):
 
     if not isinstance(providers, dict) or not providers:
         errors.append("providers: at least one provider is required")
+        providers = {}
     if not isinstance(aliases, list) or not aliases:
         errors.append("aliases: at least one alias is required")
         return errors
 
+    for provider_name, provider in providers.items():
+        if not isinstance(provider, dict):
+            errors.append("provider '%s': expected a mapping, got %s"
+                          % (provider_name, _type_name(provider)))
+
     names = []
     for alias in aliases:
-        name = alias.get("name") if isinstance(alias, dict) else None
+        if not isinstance(alias, dict):
+            errors.append("alias entry: expected a mapping, got %s" % _type_name(alias))
+            continue
+        name = alias.get("name")
         if not name:
             errors.append("alias with no name")
             continue
@@ -60,14 +73,20 @@ def validate(models):
 
     known = set(names)
     for alias in aliases:
+        if not isinstance(alias, dict):
+            continue
         name = alias.get("name")
         if not name:
             continue
         deployments = alias.get("deployments")
-        if not deployments:
+        if not isinstance(deployments, list) or not deployments:
             errors.append("alias '%s': at least one deployment is required" % name)
             continue
         for dep in deployments:
+            if not isinstance(dep, dict):
+                errors.append("alias '%s': deployment entry: expected a mapping, got %s"
+                              % (name, _type_name(dep)))
+                continue
             dialect = dep.get("dialect")
             if dialect not in DIALECTS:
                 errors.append("alias '%s': unknown dialect %r (expected one of %s)"
@@ -78,6 +97,10 @@ def validate(models):
             if provider is None:
                 errors.append("alias '%s': unknown provider '%s'" % (name, provider_name))
                 continue
+            if not isinstance(provider, dict):
+                errors.append("alias '%s': provider '%s' is not a mapping"
+                              % (name, provider_name))
+                continue
             field = "chat_base" if dialect == "openai" else "messages_base"
             if not provider.get(field):
                 errors.append("alias '%s': provider '%s' has no %s"
@@ -86,10 +109,17 @@ def validate(models):
                 errors.append("alias '%s': deployment has no model" % name)
 
     for alias in aliases:
+        if not isinstance(alias, dict):
+            continue
         name = alias.get("name")
         if not name:
             continue
-        for target in alias.get("fallbacks") or []:
+        fallbacks = alias.get("fallbacks") or []
+        if not isinstance(fallbacks, list):
+            errors.append("alias '%s': fallbacks must be a list, got %s"
+                          % (name, _type_name(fallbacks)))
+            continue
+        for target in fallbacks:
             if target == name:
                 errors.append("alias '%s': fallback points at itself" % name)
             elif target not in known:
@@ -102,10 +132,15 @@ def validate(models):
 def _cycles(aliases, known):
     graph = {}
     for alias in aliases:
+        if not isinstance(alias, dict):
+            continue
         name = alias.get("name")
         if not name:
             continue
-        graph[name] = [t for t in (alias.get("fallbacks") or [])
+        fallbacks = alias.get("fallbacks") or []
+        if not isinstance(fallbacks, list):
+            fallbacks = []
+        graph[name] = [t for t in fallbacks
                        if t in known and t != name]
 
     WHITE, GREY, BLACK = 0, 1, 2

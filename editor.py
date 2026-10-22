@@ -160,11 +160,13 @@ class _Handler(BaseHTTPRequestHandler):
         if errors:
             return self._json(400, {"errors": errors})
         root = self.server.root
-        _write_models(root / "models.yaml", models)
         try:
+            _write_models(root / "models.yaml", models)
             routing.write_config(models, root / "litellm-config.yaml")
         except routing.ConfigError as exc:
             return self._json(400, {"errors": exc.errors})
+        except OSError as exc:
+            return self._json(500, {"error": "apply failed: %s" % exc})
         restart = self.server.restart
         if restart is not None:
             try:
@@ -183,19 +185,22 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(provider, dict):
                 continue
             key_env = provider.get("key_env")
-            if key_env and os.environ.get(key_env):
-                chosen = (name, provider)
+            key = os.environ.get(key_env) if key_env else None
+            if key:
+                chosen = (name, provider, key)
                 break
         if chosen is None:
             return self._json(400, {"error": "no provider has its API key set"})
 
-        name, provider = chosen
+        name, provider, key = chosen
         base = (provider.get("chat_base") or "").rstrip("/")
         if not base:
-            return self._json(502, {"error": "provider %r has no chat_base" % name, "status": 502})
+            return self._json(400, {"error": "provider %r has no chat_base" % name})
 
+        request = urllib.request.Request(base + "/models",
+                                         headers={"Authorization": "Bearer %s" % key})
         try:
-            with urllib.request.urlopen(base + "/models", timeout=CATALOG_TIMEOUT) as resp:
+            with urllib.request.urlopen(request, timeout=CATALOG_TIMEOUT) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             return self._json(502, {

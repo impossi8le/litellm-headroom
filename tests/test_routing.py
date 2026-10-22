@@ -73,6 +73,24 @@ class ValidateTests(unittest.TestCase):
         errors = routing.validate(cfg)
         self.assertTrue(any("ghost" in e for e in errors), errors)
 
+    def test_provider_value_not_a_mapping_reported(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["providers"]["p1"] = "oops"
+        errors = routing.validate(cfg)
+        self.assertTrue(any("p1" in e and "mapping" in e for e in errors), errors)
+
+    def test_alias_entry_not_a_mapping_reported(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["aliases"].append("oops")
+        errors = routing.validate(cfg)
+        self.assertTrue(any("mapping" in e for e in errors), errors)
+
+    def test_deployment_entry_not_a_mapping_reported(self):
+        cfg = yaml.safe_load(yaml.safe_dump(GOOD))
+        cfg["aliases"][0]["deployments"].append("oops")
+        errors = routing.validate(cfg)
+        self.assertTrue(any("mapping" in e for e in errors), errors)
+
     def test_load_and_validate_raises_with_all_errors(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "models.yaml"
