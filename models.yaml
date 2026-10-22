@@ -1,5 +1,10 @@
 # Source of truth for routing. render.py turns this into litellm-config.yaml.
 # Holds no credentials: key_env names an environment variable.
+compression:
+  enabled: true
+  api_base: http://127.0.0.1:8787
+  timeout: 15
+  unreachable_fallback: fail_open
 providers:
   relay-fast:
     key_env: RELAY_FAST_API_KEY

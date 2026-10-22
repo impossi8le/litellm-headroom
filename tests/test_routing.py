@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import yaml
 import routing
+import copy
 
 GOOD = {
     "providers": {"p1": {"key_env": "K1", "chat_base": "https://a/v1", "messages_base": "https://a"}},
@@ -16,6 +17,81 @@ GOOD = {
 }
 
 class ValidateTests(unittest.TestCase):
+    def test_malformed_json_values_return_errors_without_crashing(self):
+        for value in (None, [], "oops", 42, True):
+            with self.subTest(value=value):
+                self.assertTrue(routing.validate(value))
+        for path in (("aliases", 0, "name"), ("aliases", 0, "fallbacks"),
+                     ("aliases", 0, "deployments", 0, "provider"),
+                     ("aliases", 0, "model_info"), ("timeouts",)):
+            for value in ([{}], {"bad": []}, True, 23):
+                if path[-1] == "model_info" and isinstance(value, dict):
+                    continue
+                cfg = copy.deepcopy(GOOD)
+                node = cfg
+                for part in path[:-1]:
+                    node = node[part]
+                node[path[-1]] = value
+                with self.subTest(path=path, value=value):
+                    self.assertTrue(routing.validate(cfg))
+
+    def test_missing_or_literal_key_env_rejected(self):
+        for value in (None, "sk-literal-secret", ["KEY"]):
+            cfg = copy.deepcopy(GOOD)
+            cfg["providers"]["p1"]["key_env"] = value
+            self.assertTrue(routing.validate(cfg))
+
+    def test_invalid_timeouts_rejected(self):
+        for key, value in (("request", 0), ("stream", -1), ("total", float("inf")),
+                           ("cooldown", True), ("retries", 0.5), ("request", "120")):
+            cfg = copy.deepcopy(GOOD)
+            cfg["timeouts"][key] = value
+            self.assertTrue(routing.validate(cfg))
+
+    def test_credentials_in_url_rejected(self):
+        cfg = copy.deepcopy(GOOD)
+        cfg["providers"]["p1"]["chat_base"] = "https://user:password@example.com/v1"
+        self.assertTrue(routing.validate(cfg))
+
+    def test_native_adapter_accepts_ambient_credentials(self):
+        cfg = copy.deepcopy(GOOD)
+        cfg["providers"]["cloud"] = {"params": {"aws_region_name": "us-east-1"}}
+        cfg["aliases"][0]["deployments"] = [{"provider": "cloud", "dialect": "native",
+                                             "model": "bedrock/test-model", "order": 1}]
+        self.assertEqual(routing.validate(cfg), [])
+        out = routing.render_config(cfg)["model_list"][0]["litellm_params"]
+        self.assertEqual(out["model"], "bedrock/test-model")
+        self.assertEqual(out["aws_region_name"], "us-east-1")
+        self.assertNotIn("api_key", out)
+        self.assertNotIn("api_base", out)
+
+    def test_params_override_and_credential_references(self):
+        cfg = copy.deepcopy(GOOD)
+        cfg["providers"]["p1"]["params"] = {"rpm": 20, "timeout": 60,
+            "aws_secret_access_key": "os.environ/AWS_SECRET_ACCESS_KEY"}
+        cfg["aliases"][0]["deployments"][0]["params"] = {"rpm": 10}
+        out = routing.render_config(cfg)["model_list"][0]["litellm_params"]
+        self.assertEqual(out["rpm"], 10)
+        self.assertEqual(out["timeout"], 60)
+        cfg["providers"]["p1"]["params"]["aws_secret_access_key"] = "literal"
+        self.assertTrue(routing.validate(cfg))
+
+    def test_anonymous_compatible_endpoint(self):
+        cfg = copy.deepcopy(GOOD)
+        cfg["providers"]["p1"] = {"anonymous": True, "api_base": "http://127.0.0.1:1234/v1/"}
+        out = routing.render_config(cfg)["model_list"][0]["litellm_params"]
+        self.assertEqual(out["api_key"], "not-needed")
+        self.assertEqual(out["api_base"], "http://127.0.0.1:1234/v1")
+
+    def test_compression_is_configurable(self):
+        cfg = copy.deepcopy(GOOD)
+        cfg["compression"] = {"enabled": False}
+        self.assertNotIn("guardrails", routing.render_config(cfg))
+        cfg["compression"] = {"timeout": 8, "unreachable_fallback": "fail_closed"}
+        params = routing.render_config(cfg)["guardrails"][0]["litellm_params"]
+        self.assertEqual(params["timeout"], 8)
+        self.assertEqual(params["unreachable_fallback"], "fail_closed")
+
     def test_good_config_has_no_errors(self):
         self.assertEqual(routing.validate(GOOD), [])
 

@@ -1,0 +1,72 @@
+# Example only: replace YOUR_MODEL placeholders with models available to your account.
+compression:
+  enabled: true
+  timeout: 15
+  unreachable_fallback: fail_open
+providers:
+  compatible:
+    key_env: COMPATIBLE_API_KEY
+    api_base: https://your-gateway.example/v1
+  azure:
+    key_env: AZURE_API_KEY
+    api_base: https://YOUR-RESOURCE.openai.azure.com
+    params:
+      api_version: os.environ/AZURE_API_VERSION
+  gemini:
+    key_env: GEMINI_API_KEY
+  bedrock:
+    # Uses the AWS credential chain; no api_key required.
+    params:
+      aws_region_name: us-east-1
+  vertex:
+    # Uses Application Default Credentials.
+    params:
+      vertex_project: os.environ/GOOGLE_CLOUD_PROJECT
+      vertex_location: us-central1
+  local:
+    api_base: http://127.0.0.1:11434
+aliases:
+- name: portable
+  deployments:
+  - provider: compatible
+    dialect: openai
+    model: YOUR_MODEL
+    order: 1
+    params:
+      rpm: 60
+  fallbacks: [google]
+- name: google
+  deployments:
+  - provider: gemini
+    dialect: native
+    model: gemini/YOUR_MODEL
+    order: 1
+  fallbacks: [local]
+- name: local
+  deployments:
+  - provider: local
+    dialect: native
+    model: ollama/YOUR_MODEL
+    order: 1
+  fallbacks: []
+- name: azure
+  deployments:
+  - provider: azure
+    dialect: native
+    model: azure/YOUR_DEPLOYMENT
+    order: 1
+  fallbacks: []
+- name: aws
+  deployments:
+  - provider: bedrock
+    dialect: native
+    model: bedrock/YOUR_MODEL_ID
+    order: 1
+  fallbacks: []
+- name: vertex
+  deployments:
+  - provider: vertex
+    dialect: native
+    model: vertex_ai/YOUR_MODEL
+    order: 1
+  fallbacks: []

@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +26,7 @@ import routing
 
 ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 CATALOG_TIMEOUT = 5
+MAX_BODY_BYTES = 2 * 1024 * 1024
 
 
 def _origin_allowed(raw):
@@ -73,6 +76,17 @@ def _write_models(path, models):
         raise
 
 
+def _write_bytes(path, content):
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "HeadroomEditor/1.0"
 
@@ -103,6 +117,10 @@ class _Handler(BaseHTTPRequestHandler):
         if not _origin_allowed(self.headers.get("Origin")):
             self._json(403, {"error": "forbidden origin"})
             return False
+        origin = self.headers.get("Origin")
+        if origin and origin.rstrip("/") != "http://" + self.headers.get("Host", ""):
+            self._json(403, {"error": "same origin required"})
+            return False
         if self.command == "POST" and not _is_json_content_type(
                 self.headers.get("Content-Type")):
             self._json(415, {"error": "Content-Type must be application/json"})
@@ -131,6 +149,8 @@ class _Handler(BaseHTTPRequestHandler):
             return None, "invalid Content-Length"
         if length <= 0:
             return None, "request body is required"
+        if length > MAX_BODY_BYTES:
+            return None, "request body exceeds 2 MiB"
         raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -168,12 +188,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._guard():
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path == "/api/config":
-            return self._post_config()
-        if path == "/api/render":
-            return self._post_render()
-        if path == "/api/apply":
-            return self._post_apply()
+        with self.server.mutation_lock:
+            if path == "/api/config":
+                return self._post_config()
+            if path == "/api/render":
+                return self._post_render()
+            if path == "/api/apply":
+                return self._post_apply()
         return self._json(404, {"error": "not found"})
 
     def _page(self):
@@ -195,7 +216,10 @@ class _Handler(BaseHTTPRequestHandler):
         errors = routing.validate(models)
         if errors:
             return self._json(400, {"errors": errors})
-        _write_models(self._models_path(), models)
+        try:
+            _write_models(self._models_path(), models)
+        except OSError:
+            return self._json(500, {"error": "cannot write models.yaml"})
         self._json(200, {"ok": True})
 
     def _post_render(self):
@@ -217,12 +241,34 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"errors": errors})
         root = self.server.root
         try:
+            previous = {p: p.read_bytes() if p.exists() else None for p in
+                        (root / "models.yaml", root / "litellm-config.yaml")}
+        except OSError:
+            return self._json(500, {"error": "cannot read previous configuration; nothing applied"})
+
+        def restore():
+            for path, content in previous.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_bytes(path, content)
+
+        try:
+            backup = root / "backups" / datetime.datetime.now(datetime.timezone.utc).strftime("apply_%Y%m%d_%H%M%S_%f")
+            backup.mkdir(parents=True)
+            for path, content in previous.items():
+                if content is not None:
+                    (backup / path.name).write_bytes(content)
             _write_models(root / "models.yaml", models)
             routing.write_config(models, root / "litellm-config.yaml")
         except routing.ConfigError as exc:
             return self._json(400, {"errors": exc.errors})
-        except OSError as exc:
-            return self._json(500, {"error": "apply failed: %s" % exc})
+        except OSError:
+            try:
+                restore()
+            except OSError:
+                return self._json(500, {"error": "apply and restore failed; recover from backups before restarting"})
+            return self._json(500, {"error": "apply failed; previous files restored"})
         restart = self.server.restart
         if restart is None:
             return self._json(200, {
@@ -233,13 +279,27 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             restarted = restart() is not False
             restart_error = None if restarted else "restart hook reported failure"
-        except Exception as exc:  # noqa: BLE001 - report, don't crash the request
+        except Exception:  # noqa: BLE001 - report, don't crash the request
             restarted = False
-            restart_error = "restart failed: %s" % exc
+            restart_error = "restart hook failed"
+        rolled_back = False
+        rollback_restarted = None
+        if not restarted:
+            try:
+                restore()
+            except OSError:
+                return self._json(500, {"error": "restart and restore failed; recover from backups"})
+            rolled_back = True
+            try:
+                rollback_restarted = restart() is not False
+            except Exception:
+                rollback_restarted = False
         self._json(200, {
             "rendered": True,
             "restarted": restarted,
             "restart_error": restart_error,
+            "rolled_back": rolled_back,
+            "rollback_restarted": rollback_restarted,
         })
 
     def _catalog(self):
@@ -288,10 +348,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(root, host="127.0.0.1", port=8788, restart=None):
+    if host not in ALLOWED_HOSTS:
+        raise ValueError("editor must bind to loopback")
     server = ThreadingHTTPServer((host, port), _Handler)
     server.daemon_threads = True
     server.root = Path(root).resolve()
     server.restart = restart
+    server.mutation_lock = threading.RLock()
     return server
 
 

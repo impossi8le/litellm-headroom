@@ -31,6 +31,30 @@ class _RecordingHandler(BaseHTTPRequestHandler):
 
 
 class EditorTests(unittest.TestCase):
+    def test_apply_failure_restores_both_files_and_restarts_old_config(self):
+        original = (self.root / "models.yaml").read_bytes()
+        generated = self.root / "litellm-config.yaml"
+        generated.write_bytes(b"old config\n")
+        changed = yaml.safe_load(yaml.safe_dump(CFG))
+        changed["aliases"][0]["deployments"][0]["model"] = "new"
+        self.server.restart = mock.Mock(side_effect=[False, True])
+        body = json.loads(self.post("/api/apply", changed).read())
+        self.assertTrue(body["rolled_back"])
+        self.assertTrue(body["rollback_restarted"])
+        self.assertEqual((self.root / "models.yaml").read_bytes(), original)
+        self.assertEqual(generated.read_bytes(), b"old config\n")
+        self.assertEqual(self.server.restart.call_count, 2)
+        self.assertEqual(len(list((self.root / "backups").glob("apply_*"))), 1)
+
+    def test_different_local_port_origin_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.post("/api/config", CFG, headers={"Origin": "http://127.0.0.1:1"})
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_bind_public_interface_rejected(self):
+        with self.assertRaises(ValueError):
+            editor.make_server(self.root, host="0.0.0.0", port=0)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

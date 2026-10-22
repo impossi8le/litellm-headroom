@@ -1,4 +1,4 @@
-param([int]$StartupTimeoutSeconds = 120, [switch]$Restart)
+param([ValidateRange(1, 600)][int]$StartupTimeoutSeconds = 120, [switch]$Restart, [switch]$NoEditor)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -15,17 +15,23 @@ function Import-EnvFile([string]$Path) {
     foreach ($line in Get-Content -LiteralPath $Path) {
         $trimmed = $line.Trim()
         if (!$trimmed -or $trimmed.StartsWith('#')) { continue }
+        if ($trimmed.StartsWith('export ')) { $trimmed = $trimmed.Substring(7).TrimStart() }
         $idx = $trimmed.IndexOf('=')
         if ($idx -lt 1) { continue }
         $name = $trimmed.Substring(0, $idx).Trim()
-        $value = $trimmed.Substring($idx + 1).Trim().Trim('"').Trim("'")
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+        $value = $trimmed.Substring($idx + 1).Trim()
+        if ($value.Length -ge 2 -and (($value[0] -eq '"' -and $value[-1] -eq '"') -or ($value[0] -eq "'" -and $value[-1] -eq "'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
         if (!(Test-Path "Env:$name")) { Set-Item -Path "Env:$name" -Value $value }
     }
 }
 
 function Stop-LiteLLM {
     $targets = @(Get-CimInstance Win32_Process | Where-Object {
-        ($_.Name -match '^python(w)?\.exe$') -and ($_.CommandLine -match '\blitellm\.proxy\.proxy_cli\b')
+        ($_.Name -match '^python(w)?\.exe$') -and ($_.CommandLine -match '\blitellm\.proxy\.proxy_cli\b') -and
+        ($_.CommandLine -match [regex]::Escape($config))
     })
     foreach ($target in $targets) {
         $running = Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue
@@ -91,14 +97,20 @@ try {
     Remove-Item Env:LITELLM_LOG -ErrorAction SilentlyContinue
     $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONUNBUFFERED = '1'
-    $env:HEADROOM_TELEMETRY = 'off'
+    # Local aggregate counters power /stats and /dashboard; external beacon stays off.
+    $env:HEADROOM_TELEMETRY = 'on'
     $env:HEADROOM_BEACON = 'off'
     $env:LITELLM_TELEMETRY = 'False'
     Start-ServiceProcess 'headroom' $headroom @('proxy', '--host', '127.0.0.1', '--port', '8787', '--ccr-inline-resolve') 'http://127.0.0.1:8787/health'
     Start-ServiceProcess 'litellm' $litellm @('-m', 'litellm.proxy.proxy_cli', '--config', ('"' + $config + '"'), '--host', '127.0.0.1', '--port', '8001') 'http://127.0.0.1:8001/health/liveliness'
+    if (!$NoEditor) {
+        Start-ServiceProcess 'editor' $litellm @(('"' + (Join-Path $PSScriptRoot 'editor.py') + '"'), '--root', ('"' + $PSScriptRoot + '"'), '--no-browser') 'http://127.0.0.1:8788/api/config'
+    }
     Write-Host ''
     Write-Host 'Gateway URL: http://127.0.0.1:8001'
     Write-Host 'Models: http://127.0.0.1:8001/v1/models'
+    Write-Host 'Headroom dashboard: http://127.0.0.1:8787/dashboard'
+    if (!$NoEditor) { Write-Host 'Routing editor: http://127.0.0.1:8788/' }
     Write-Host 'API key: LITELLM_MASTER_KEY from .env (or the environment).'
     Write-Host "Logs: $logDir"
     exit 0

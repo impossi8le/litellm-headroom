@@ -5,6 +5,60 @@ Start with `bat.bat` (or `powershell -ExecutionPolicy Bypass -File .\start.ps1`)
 The launcher reuses healthy running services. `start.ps1 -Restart` restarts only
 LiteLLM; Headroom keeps running.
 
+To create/update the two desktop launchers, run
+`powershell -ExecutionPolicy Bypass -File .\install-desktop-launchers.ps1`.
+Both desktop `.bat` files call the current scripts in this checkout; previous
+desktop versions are kept in `backups/desktop_*`. The stop command targets
+processes belonging to this workspace, including the routing editor.
+
+## Multi-provider gateway (2026-10-22)
+
+The editor starts with the gateway at `http://127.0.0.1:8788/`; use
+`start.ps1 -NoEditor` to skip it. Existing relay.fast aliases are preserved.
+Add providers and deployments in the editor or in `models.yaml`:
+
+- `dialect: openai`: any OpenAI-compatible endpoint; use `api_base` or
+  `chat_base`, a bare upstream model name and `key_env`.
+- `dialect: anthropic`: an Anthropic-compatible endpoint; use `api_base` or
+  `messages_base`, a bare model name and `key_env`.
+- `dialect: native`: use the full LiteLLM model string, such as
+  `azure/YOUR_DEPLOYMENT`, `gemini/YOUR_MODEL`, `bedrock/YOUR_MODEL_ID`,
+  `vertex_ai/YOUR_MODEL` or `ollama/YOUR_MODEL`. `api_base` is optional for
+  adapters with built-in endpoints. AWS/Google credential chains work without
+  an API key; `key_env` remains available where needed.
+
+Provider `params` are inherited; deployment `params` override them. These JSON
+objects in the editor map to LiteLLM parameters, including `api_version`,
+`aws_region_name`, `vertex_project`, `vertex_location`, `rpm`, `tpm`, `weight`
+and `timeout`. Use `os.environ/NAME` for secret parameters. Use dedicated
+fields for `model`, `api_base`, `api_key` and `order`. Set provider
+`anonymous: true` for a local OpenAI-compatible server that needs no key
+(the OpenAI client receives a dummy `not-needed` value). Native adapter
+capabilities depend on the installed LiteLLM version and provider access.
+
+See `models.multi-provider.example.yaml` for a validated template and
+`.env.example` for environment variable names. Replace model placeholders
+with models available in your accounts. Fallbacks can cross providers;
+deployment `order` defines priority tiers inside an alias.
+
+Applying in the editor saves private backups under `backups/apply_*`. If the
+new service fails to restart, both previous YAML files are restored and a
+restart with the old configuration is attempted. The editor reports recovery
+status. Configuration mutations are serialized.
+
+Headroom uses a 15-second compression timeout and `fail_open` by default:
+if it is unreachable, inference continues with the original context. Set
+`compression.unreachable_fallback: fail_closed` if compression is mandatory.
+`compression.enabled: false` removes the guardrail; `compression.api_base`
+selects its endpoint. Local counters are enabled on newly launched Headroom
+processes (`/stats`, `/metrics`, `/dashboard`); the external beacon stays off.
+Existing processes keep their original environment until restarted.
+
+References: [LiteLLM configuration](https://docs.litellm.ai/docs/proxy/configs),
+[OpenAI-compatible endpoints](https://docs.litellm.ai/docs/providers/openai_compatible),
+[routing](https://docs.litellm.ai/docs/routing),
+[Headroom sidecar](https://docs.headroomlabs.ai/docs/proxy).
+
 ## First-time setup
 
 1. Create both environments as described under Dependencies.
@@ -54,14 +108,14 @@ references keys as `os.environ/<NAME>`.
 `editor.py` serves a local page on `127.0.0.1:8788` for providers (add, edit,
 delete) and aliases with deployments and fallbacks. «Сохранить» validates and
 writes `models.yaml`; «Применить» writes `models.yaml` and `litellm-config.yaml`
-and calls the restart hook passed to `make_server`. There is no
-`python editor.py` entrypoint yet; start the server with:
+and calls the restart hook passed to `make_server`. Start it independently with:
 
 ```powershell
-.\.litellm-venv\Scripts\python.exe -c "import editor; editor.make_server('.').serve_forever()"
+.\.litellm-venv\Scripts\python.exe editor.py --no-browser
 ```
 
-Without a restart hook, «Применить» does not restart LiteLLM; use
+The CLI installs a restart hook. With `--no-restart`, or `make_server` without
+a restart hook, «Применить» does not restart LiteLLM; use
 `start.ps1 -Restart` for that. The server binds to loopback only and rejects
 requests whose `Host` is not `127.0.0.1` or `localhost`. It accepts and displays
 only the env-var name, never a key value.
@@ -114,6 +168,13 @@ python -m venv .litellm-venv --system-site-packages
 .\.litellm-venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+Recreate the independent Headroom environment with:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-headroom.txt
+```
+
 A clean independent LiteLLM environment can instead omit
 `--system-site-packages` and install the same requirements. Do not install
 `litellm[proxy]` into Headroom's environment.
@@ -129,9 +190,8 @@ probes completed after approximately 110 seconds.
 The router now has a 120-second per-attempt timeout, 120-second stream timeout,
 and a 300-second overall request budget. There is at most one configured retry
 for rate limits and server errors; auth, bad-request, not-found and timeout
-errors are not retried by the error-specific policy. The existing Kimi/Claude
-fallback lists are preserved. There are no additional fallback routes for
-DeepSeek or GPT. A failure after stream output starts cannot reliably be
+errors are not retried by the error-specific policy. Fallback routes for all
+aliases are defined in `models.yaml`. A failure after stream output starts cannot reliably be
 recovered transparently; the client may need to retry the whole turn.
 
 `disable_provider_token_counting`, `ignore_unknown_params`, and
@@ -144,6 +204,22 @@ returned 200. Removing the nonexistent switch does not suppress those warnings;
 local counts are estimates. No installed library files were patched.
 
 ## Verification
+
+Targeted diagnostics (results go to `logs/smoke-results.json`):
+
+```powershell
+# Local health and real synthetic compression; no inference charges.
+.\.litellm-venv\Scripts\python.exe smoke_check.py --health-only --compression
+# A small billable request over both client protocols for one alias.
+.\.litellm-venv\Scripts\python.exe smoke_check.py --model YOUR_ALIAS --protocol both
+# Streaming probes reject SSE errors even under HTTP 200, and truncated streams.
+.\.litellm-venv\Scripts\python.exe smoke_check.py --model YOUR_ALIAS --protocol both --stream
+```
+
+Use `--workers`, `--timeout`, `--base-url`, `--headroom-url` and `--root` to
+target another deployment. `--model` can be repeated. Compression measurements
+use synthetic repetitive tool logs and a protected last-user sentinel; their
+savings do not predict every real workload.
 
 ```powershell
 .\.litellm-venv\Scripts\python.exe -m pip check

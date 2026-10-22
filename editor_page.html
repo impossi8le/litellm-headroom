@@ -96,7 +96,7 @@
   .grid { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
   .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
-  input, select {
+  input, select, textarea {
     font: inherit;
     width: 100%;
     padding: 0.35rem 0.5rem;
@@ -126,6 +126,8 @@
   .muted { color: var(--muted); }
   .hint { font-size: 12px; color: var(--muted); margin: 0 0 0.6rem; }
   [hidden] { display: none !important; }
+  textarea { min-height: 5rem; resize: vertical; font-family: Consolas, monospace; }
+  @media (max-width: 800px) { .deployment { grid-template-columns: 1fr 1fr; } }
 </style>
 </head>
 <body>
@@ -157,6 +159,7 @@
           <select id="new-dialect">
             <option value="openai">openai</option>
             <option value="anthropic">anthropic</option>
+            <option value="native">native (адаптер LiteLLM)</option>
           </select></label>
         <label class="field"><span class="field-label">Порядок</span>
           <input id="new-order" type="number" min="1" step="1" value="1"></label>
@@ -175,7 +178,7 @@
       <h2>Провайдеры</h2>
       <button id="btn-add-provider" type="button">Добавить провайдера</button>
     </div>
-    <p class="hint">Ключи здесь не вводятся: указывается только имя env-переменной, в которой лежит ключ.</p>
+    <p class="hint">Ключи здесь не вводятся: указывается имя env-переменной. Для native задайте модель с префиксом адаптера: gemini/…, azure/…, bedrock/…, ollama/…. Параметры провайдера наследуются деплойментами.</p>
     <div id="providers"></div>
   </section>
 
@@ -390,6 +393,17 @@
     wrap.appendChild(restoreButton(opts));
     var draft = draftButton(opts);
     if (draft) { wrap.appendChild(draft); }
+    return wrap;
+  }
+
+  function jsonField(label, path, value) {
+    var wrap = el("label", { className: "field" });
+    wrap.appendChild(el("span", { className: "field-label", text: label }));
+    var input = el("textarea", { spellcheck: "false" });
+    input.value = JSON.stringify(value || {}, null, 2);
+    input.dataset.path = path;
+    input.dataset.json = "1";
+    wrap.appendChild(input);
     return wrap;
   }
 
@@ -665,7 +679,23 @@
         value: provider.messages_base,
         placeholder: "https://example"
       }));
+      grid.appendChild(field({
+        label: "api_base (общий / native, необязательно)",
+        path: "providers." + name + ".api_base", alias: name, field: "api_base",
+        value: provider.api_base, placeholder: "URL адаптера или пусто для стандартного"
+      }));
+      var anonymous = el("label", { className: "field" });
+      var anonymousBox = el("input", { type: "checkbox" });
+      anonymousBox.checked = !!provider.anonymous;
+      anonymousBox.style.width = "auto";
+      anonymousBox.dataset.path = "providers." + name + ".anonymous";
+      anonymousBox.dataset.kind = "checkbox";
+      anonymous.appendChild(el("span", { text: "Без ключа (локальный сервер)" }));
+      anonymous.appendChild(anonymousBox);
+      grid.appendChild(anonymous);
       card.appendChild(grid);
+      card.appendChild(jsonField("Параметры LiteLLM (JSON): api_version, aws_region_name, vertex_project…; секреты только os.environ/NAME",
+                                "providers." + name + ".params", provider.params));
       host.appendChild(card);
     });
   }
@@ -726,7 +756,7 @@
         path: "aliases." + index + ".deployments." + depIndex + ".dialect",
         alias: key, field: "deployments." + depIndex + ".dialect",
         value: (dep && dep.dialect) || "openai",
-        options: ["openai", "anthropic"]
+        options: ["openai", "anthropic", "native"]
       }));
       row.appendChild(field({
         label: "Порядок",
@@ -748,6 +778,8 @@
       remove.dataset.dep = String(depIndex);
       row.appendChild(remove);
       card.appendChild(row);
+      card.appendChild(jsonField("Параметры деплоймента (JSON): rpm, tpm, weight, timeout…",
+                                 "aliases." + index + ".deployments." + depIndex + ".params", dep.params));
     });
 
     var addDep = el("button", { type: "button", text: "Добавить деплоймент" });
@@ -887,6 +919,19 @@
   function syncFromDom() {
     document.querySelectorAll("[data-path]").forEach(function (input) {
       var path = input.dataset.path;
+      if (input.dataset.json === "1") {
+        try {
+          var parsed = JSON.parse(input.value || "{}");
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { throw new Error("Нужен JSON-объект"); }
+          setPath(state, path, parsed);
+          delete input.dataset.invalidJson;
+          input.setCustomValidity("");
+        } catch (err) {
+          input.dataset.invalidJson = "1";
+          input.setCustomValidity("Некорректный JSON-объект");
+        }
+        return;
+      }
       if (input.dataset.numeric === "1") {
         var order = orderValue(input);
         if (order === null) {
@@ -939,6 +984,11 @@
     });
     syncFromDom();
     lastNotice = "";
+    if (document.querySelector("[data-invalid-json]")) {
+      setStatus("Не сохранено: исправьте JSON параметров.", "error");
+      document.querySelector("[data-invalid-json]").reportValidity();
+      return false;
+    }
     if (providerNameErrors()) {
       setStatus("Не сохранено: у провайдера пустое имя.", "error");
       ok = false;
@@ -996,7 +1046,11 @@
         var payload = result.payload || {};
         var message;
         var kind = "ok";
-        if (payload.restarted === true) {
+        if (payload.rolled_back) {
+          message = "Новые настройки не запустились. Предыдущие файлы восстановлены. "
+                    + (payload.rollback_restarted ? "Прежний LiteLLM запущен." : "Проверьте логи и запустите start.ps1 -Restart.");
+          kind = "error";
+        } else if (payload.restarted === true) {
           message = "Применено: оба YAML обновлены, LiteLLM перезапущен.";
         } else if (payload.restarted === null) {
           message = "Файлы записаны. Перезапустите LiteLLM: start.ps1 -Restart";
